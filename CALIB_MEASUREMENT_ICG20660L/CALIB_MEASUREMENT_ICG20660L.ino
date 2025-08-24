@@ -17,12 +17,18 @@ const int min_us = 500;        //min pulse for 0°
 const int max_us = 2500;       //max pulse for 360°
 const int error_offset_us = 13;// offset from real pulse value found experimentally - this has to be subtracted from pulse value sent to servo to make it more accurate
 
-//make sure following pins are connected on imu
+//IMU information
 const int SDA_pin = 21; //pin on ESP32
 const int SCL_pin = 22;
+DFRobot_ICG20660L_IIC imu(0x69, &Wire);  // Default I²C address (0x69 via SDO)
+sIcg20660SensorData_t accel;
+sIcg20660SensorData_t gyro;
+float temp;
 
-float ax_g, ay_g, az_g; //global variables for recording values over and over
-float gx_dps, gy_dps, gz_dps;
+
+//global variables for recording values over and over
+float ax_g, ay_g, az_g;
+
 
 
 struct data_entry {
@@ -77,12 +83,11 @@ void collect_manual() {
     float sum_x = 0, sum_y = 0, sum_z = 0;
 
     for (int j = 0; j < measurement_amount; j++) {
-      float a_x, a_y, a_z;
-      read_MPU6050();
+      read_ICG20660L();
 
-      sum_x += a_x;
-      sum_y += a_y;
-      sum_z += a_z;
+      sum_x += ax_g;
+      sum_y += ay_g;
+      sum_z += az_g;
 
       delay(10); // sekundis 100 mõõtmist
     }
@@ -167,11 +172,50 @@ void collect_servo() {
       log_measurement(avg_measurement, i);
       Serial.println("--------------------------------------------------");
     }
-    if (axis != 2) Serial.print("Change axis! Next axis: ");
+    if (axis != 2) {
+      Serial.print("Entering debug to calibrate before next axis:");
+      debug();
+      Serial.print("Change axis! Next axis: ");
+      }
     else Serial.println("Calibration completed succesfully.");
 
     if (axis == 0) Serial.println("Y- axis, blue marking.");
     if (axis == 1) Serial.println("Z- axis, green marking.");
+  }
+}
+
+void debug(){   //code for checking angles etc. by allowing user to enter any angle for calibration
+  while (1) {
+    Serial.println(">");
+    while (!Serial.available()) delay(10); // Wait until user inputs something
+    String input = Serial.readStringUntil('\n'); // Read string by user
+    input.trim();
+
+    int pulse_us = -1;
+
+    // Check if angle command
+    if (input.startsWith("A")) {
+      int angle = input.substring(1).toInt();
+      if (angle < 0) angle = 0;
+      if (angle > 360) angle = 360;
+
+      // Map angle to pulse, add 10 µs to correct offset
+      pulse_us = min_us + ((long)(max_us - min_us) * angle) / 360 - 13;
+
+    } 
+    else if (input == "0") break;
+    else pulse_us = input.toInt(); // Direct pulse command
+
+    // Clamp pulse within safe range
+    if (pulse_us < 500) pulse_us = 500;
+    if (pulse_us > 2500) pulse_us = 2500;
+
+    // Convert pulse to duty for 16-bit PWM
+    uint32_t duty = (uint32_t)((pulse_us * 65536UL) / 20000UL);
+    ledcWrite(servo_pin, duty);
+
+    Serial.print("Moved to pulse: ");
+    Serial.println(pulse_us);
   }
 }
 
@@ -193,14 +237,21 @@ void rotate_servo(int current_pos){
 }
 
 void read_ICG20660L(){
-  imu.read_sensor_data(ax_g, ay_g, az_g);
+  imu.getSensorData(&accel, &gyro, &temp);
 
-  Serial.print("Accel [g] X="); Serial.print(ax);
-  Serial.print(" Y="); Serial.print(ay);
-  Serial.print(" Z="); Serial.println(az);
+  // But only use accel
+  Serial.print("Accel X: "); Serial.print(accel.x, 4);
+  ax_g = accel.x;
 
-  Serial.print("Temp [°C]="); Serial.println(temp, 2);
-  delay(200);
+  Serial.print(" g  Y: ");   Serial.print(accel.y, 4);
+  ay_g = accel.y;
+
+  Serial.print(" g  Z: ");   Serial.println(accel.z, 4);
+  az_g = accel.z;
+
+  Serial.print("Temp: "); Serial.println(temp, 2);
+
+  delay(10);
 }
 
 char get_user_input(){
@@ -229,16 +280,17 @@ void setup() {
   Serial.begin(115200);
   while (!Serial);
 
+  Wire.begin(SDA_pin, SCL_pin); // SDA=21, SCL=22 for ESP32
+
   ledcAttach(servo_pin, freq, resolution);
 
   if (imu.begin() != 0) {
     Serial.println("Failed to initialize ICG-20660L!");
     while (1);
   }
-  Serial.println("ICG-20660L initialized.");
+  imu.enableSensor(0b00111111); // Bits 0-5 = gyro XYZ + accel XYZ
 
-  imu.enableSensor(ACCEL_ENABLE);  // Turn on accelerometer used for this test
-  }
+  Serial.println("ICG-20660L initialized.");
 }
 
 void loop() {
@@ -246,6 +298,7 @@ void loop() {
   Serial.println("Choose calibration:");
   Serial.println("1 - Manual accelerometer");
   Serial.println("2 - Servo-assisted accelerometer");
+  Serial.println("3 - Debug");
   Serial.println(">");
 
   char choice = get_user_input();
@@ -257,6 +310,9 @@ void loop() {
   else if (choice == '2') {
     Serial.println("&MODE=S_ACCEL");
     collect_servo();
+  }
+  else if (choice == '3') {
+    debug();
   }
   else {
     Serial.println("Invalid choice.");
