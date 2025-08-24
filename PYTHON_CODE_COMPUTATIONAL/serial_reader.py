@@ -3,14 +3,7 @@ import threading
 import time
 import serial.tools.list_ports
 
-
-arduino_port = 'COM6'  
 baud_rate = 115200
-
-timestamp = time.strftime('%Y%m%d-%H%M')
-filename = f"calib_data_{timestamp}.txt"
-
-print(f"Saving data to {filename}... Press Ctrl+C to stop.")
 
 ser = None
 ready_to_send = False
@@ -29,7 +22,7 @@ except Exception as e:
     print(f"{e}")
     arduino_port = input("Enter COM port manually (e.g., COM6): ")    # asks user to manually enter port if not found
 
-def read_from_serial(file):
+def read_from_serial(file): 
     global ready_to_send
     while True:
         if ser.in_waiting > 0:
@@ -64,10 +57,17 @@ def write_to_serial():
 try:
     ser = serial.Serial(arduino_port, baud_rate, timeout=1)
     print(f"Connected to {arduino_port}")
-    time.sleep(2)  # waits until Arduino initalizes
+
+    timestamp = time.strftime('%Y%m%d-%H%M')    # unique timestamp so new file created every time data is measured
+    filename = f"calib_data_{timestamp}.txt"
 
     with open(filename, 'w') as file:
+        # manually reset ESP32
+        ser.dtr = False
+        time.sleep(0.1)
+        ser.dtr = True
 
+        print(f"Saving data to {filename}... Press Ctrl+C to stop.")
         file.write(f'Calibration data from {timestamp}\n')
 
         reader_thread = threading.Thread(target=read_from_serial, args=(file,), daemon=True)

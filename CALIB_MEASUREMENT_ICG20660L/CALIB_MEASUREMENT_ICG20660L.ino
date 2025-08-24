@@ -173,7 +173,7 @@ void collect_servo() {
       Serial.println("--------------------------------------------------");
     }
     if (axis != 2) {
-      Serial.print("Entering debug to calibrate before next axis:");
+      Serial.println("Entering debug to calibrate before next axis:");
       debug();
       Serial.print("Change axis! Next axis: ");
       }
@@ -279,6 +279,7 @@ char get_user_input(){
 void setup() {
   Serial.begin(115200);
   while (!Serial);
+   delay(1000);            // give host time to start listening
 
   Wire.begin(SDA_pin, SCL_pin); // SDA=21, SCL=22 for ESP32
 
