@@ -1,3 +1,0 @@
-Calibration data from 20250822-0008
-
---- Calibration mode: S_ACCEL ---
