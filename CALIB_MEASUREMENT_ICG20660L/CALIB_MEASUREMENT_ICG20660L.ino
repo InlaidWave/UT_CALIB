@@ -15,12 +15,14 @@ constexpr int channel = 0;   //PWM channel, ESP32 has 16 different channels for 
 constexpr int resolution = 16;  //16-bit PWM resolution (max res for max precision)
 const int min_us = 500;        //min pulse for 0°
 const int max_us = 2500;       //max pulse for 360°
-const int error_offset_us = 13;// offset from real pulse value found experimentally - this has to be subtracted from pulse value sent to servo to make it more accurate
+
+int error_offset_us = 0;// offset from real pulse value found experimentally - this has to be subtracted from pulse value sent to servo to make it more accurate
 
 //IMU information
 const int SDA_pin = 21; //pin on ESP32
 const int SCL_pin = 22;
 DFRobot_ICG20660L_IIC imu(0x69, &Wire);  // Default I²C address (0x69 via SDO)
+const int IMU_freq = 200;
 sIcg20660SensorData_t accel;
 sIcg20660SensorData_t gyro;
 float temp;
@@ -54,18 +56,22 @@ void collect_manual() {
   for (int i = 0; i < all_pos; i++) {
     int group = i / pos; // grupeerimise abil saab anda teada serial monitoris, millisest teljes jutt käib
     int true_pos = i % pos;
-    
-    if (group == 0) avg_measurement[i].current_axis = 'X';
-    else if (group == 1) avg_measurement[i].current_axis = 'Y';
-    else avg_measurement[i].current_axis = 'Z';
 
     Serial.println("Position ");
     Serial.print(true_pos);
     Serial.print(" - Rotation around ");
-    if (group == 0) Serial.println("X-axis");
-    else if (group == 1) Serial.println("Y-axis");
-    else Serial.println("Z-axis");
-    
+    if (group == 0) {
+      Serial.println("X-axis");
+      avg_measurement[i].current_axis = 'X-Z';
+    }
+    else if (group == 1) {
+      Serial.println("Y-axis");
+      avg_measurement[i].current_axis = 'X-Y';
+    }
+    else {
+      Serial.println("Z-axis");
+      avg_measurement[i].current_axis = 'Y-Z';
+    }
     if (true_pos == 0 && group != 0){
       Serial.println("IMPORTANT: NEW AXIS! CONFIRM AXIS!");
       Serial.println("Type 'c' and press ENTER to start calibration on this axis.");
@@ -129,7 +135,7 @@ void collect_manual() {
       }
     }
   }
-} 
+}
 
 void collect_servo() {
   struct data_entry avg_measurement[all_pos];
@@ -200,8 +206,12 @@ void debug(){   //code for checking angles etc. by allowing user to enter any an
       if (angle > 360) angle = 360;
 
       // Map angle to pulse, add 10 µs to correct offset
-      pulse_us = min_us + ((long)(max_us - min_us) * angle) / 360 - 13;
+      pulse_us = min_us + ((long)(max_us - min_us) * angle) / 360 - error_offset_us;
 
+    } 
+    else if (input.startsWith("E")) {
+      error_offset_us = input.substring(1).toInt();
+      continue;
     } 
     else if (input == "0") break;
     else pulse_us = input.toInt(); // Direct pulse command
@@ -251,7 +261,7 @@ void read_ICG20660L(){
 
   Serial.print("Temp: "); Serial.println(temp, 2);
 
-  delay(10);
+  delay(1000/IMU_freq); //depending on user chosen measuring frequency, a delay is found
 }
 
 char get_user_input(){
@@ -319,4 +329,4 @@ void loop() {
     Serial.println("Invalid choice.");
   }
 
-}
+} 
