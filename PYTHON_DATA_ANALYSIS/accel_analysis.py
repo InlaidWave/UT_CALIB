@@ -5,6 +5,7 @@ import numpy as np
 mode = None
 data_folder = "DATA"
 data_log = []
+g = 9.81872
 
 def list_txt_files(directory):
     folder_path = os.path.join(directory, data_folder)
@@ -12,7 +13,6 @@ def list_txt_files(directory):
 
 def read_file_data(file_path):
     data_log_position = -1
-    print(file_path)
 
     with open(file_path, "r") as f:
         for line in f:
@@ -24,7 +24,6 @@ def read_file_data(file_path):
                     mode = "Motorized testbench accelerometer calibration"
                 else:
                     mode = mode_f   # makes mode raw mode name if not recognised
-                print("Calibration mode:", mode)
             else:
                 data_log_position += 1
                 line = line.strip()
@@ -47,11 +46,8 @@ def read_file_data(file_path):
                     "axis": axis,
                     "position on axis(deg)": pos_deg
                 })
-
-                print(data_log[data_log_position])
     
     print("-----------------")
-    remove_tilt()
 
 def remove_tilt():
     averages = {}
@@ -76,14 +72,11 @@ def remove_tilt():
         z_avg = sum(float(r["z"]) for r in readings_special) / len(readings_special)
         averages[special_pair] = {"x": x_avg, "y": y_avg, "z": z_avg}
 
-    for pair, avg in averages.items():
-        print(f"Pair {pair}: x={avg['x']}, y={avg['y']}, z={avg['z']}")
-
 def compose_meas_matrix():
 
-    x_values = [(float(r["x"]) *  9.81) for r in data_log]
-    y_values = [(float(r["y"]) * 9.81) for r in data_log]
-    z_values = [(float(r["z"]) * 9.81) for r in data_log]
+    x_values = [(float(r["x"]) *  g) for r in data_log]
+    y_values = [(float(r["y"]) * g) for r in data_log]
+    z_values = [(float(r["z"]) * g) for r in data_log]
 
     meas_matrix = {
         "x": [[x] for x in x_values],  # a x 1 matrix for x
@@ -93,7 +86,7 @@ def compose_meas_matrix():
 
     return meas_matrix
 
-def compose_true_matrix(g=9.81):
+def compose_true_matrix():
     step = 15  # 15-degree increments
     max_deg = 360  # Maximum rotation for each axis pair
 
@@ -136,11 +129,6 @@ def calculate_using_least_squares(M, T):
     T = np.array(T)
     M = np.array(M).reshape(-1, 1)  # Ensure M is a column vector
 
-    print("True Matrix (T):")
-    print(T)
-    print("Measured Matrix (M):")
-    print(M)
-
     # Step 1: Compute T^T (transpose of T)
     Tt = T.T
 
@@ -150,11 +138,6 @@ def calculate_using_least_squares(M, T):
     # Step 3: Compute T^T * M
     TtM = np.dot(Tt, M)
 
-    print("Shape of T:", T.shape)
-    unique_rows = np.unique(T, axis=0)
-    print("Number of unique rows in T:", len(unique_rows))
-    
-
     # Step 4: Compute the inverse of T^T * T
     try:
         invTtT = np.linalg.inv(TtT)
@@ -162,9 +145,35 @@ def calculate_using_least_squares(M, T):
         raise ValueError("Matrix inversion failed. Likely a faulty calibration process.")
 
     # Step 5: Compute x = inv(T^T * T) * T^T * M
-    x = np.dot(invTtT, TtM)
+    result = np.dot(invTtT, TtM)
 
-    return x
+    return result
+
+def make_calibration():
+    scale_matrix = np.column_stack([result_x[:3], result_y[:3], result_z[:3]])  # also shape (3,3)
+    bias_matrix = np.array([[result_x[3]], [result_y[3]], [result_z[3]]]).reshape(3, 1)  # shape (3,1)
+
+    print(scale_matrix)
+
+    meas_Nx3 = np.column_stack([    # make one matrix where all xyz values are held
+    meas_matrix["x"],
+    meas_matrix["y"],
+    meas_matrix["z"]
+    ])
+
+    print("scale_matrix shape:", scale_matrix.shape)
+    print("bias_matrix shape:", bias_matrix.shape)
+
+    meas_xyz = [row.reshape(3, 1) for row in meas_Nx3]  # rearrange into separate matrices w/ xyz values for one position each
+    
+    calibrated_matrix = []
+    for i in range(len(meas_xyz)):
+        calibrated_meas = scale_matrix @ (meas_xyz[i] - bias_matrix)
+        calibrated_matrix.append(calibrated_meas.flatten())   # flatten back to 1x3 for storage
+    
+    calibrated_matrix = np.array(calibrated_matrix) # turn into numpy matrix
+
+    print(calibrated_matrix)
 
 def calculate_x_differences(meas_matrix, true_matrix):
 
@@ -210,6 +219,8 @@ def compare_results():
     print(differences)
 
 if __name__ == "__main__":
+    np.set_printoptions(suppress=True)  # This will print all numbers in decimal notation
+
     txt_files = list_txt_files(".")
     print("Available .txt files:")
     for idx, fname in enumerate(txt_files):
@@ -222,5 +233,7 @@ if __name__ == "__main__":
     meas_matrix = compose_meas_matrix()
 
     result_x = calculate_using_least_squares(meas_matrix["x"], true_matrix)
-    print("Calibration Result (x):")
-    print(result_x)
+    result_y = calculate_using_least_squares(meas_matrix["y"], true_matrix)
+    result_z = calculate_using_least_squares(meas_matrix["z"], true_matrix)
+
+    make_calibration()
