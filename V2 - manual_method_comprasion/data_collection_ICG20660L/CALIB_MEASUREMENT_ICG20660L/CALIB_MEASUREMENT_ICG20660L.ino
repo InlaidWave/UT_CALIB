@@ -4,7 +4,7 @@
 
 constexpr float g = 9.81735f; //exact g, may be changed
 constexpr int increment_angle = 15;
-constexpr int measurement_amount = 300; //measurements in one position
+constexpr int measurement_amount = 800; //measurements in one position
 constexpr int pos = 360 / increment_angle; //24 different positions on each axis
 constexpr int all_pos = pos*3; //all of the positions on all axes combined
 
@@ -22,10 +22,23 @@ int error_offset_us = 0;// offset from real pulse value found experimentally - t
 const int SDA_pin = 21; //pin on ESP32
 const int SCL_pin = 22;
 DFRobot_ICG20660L_IIC imu(0x69, &Wire);  // Default I²C address (0x69 via SDO)
-const int IMU_freq = 200;
 sIcg20660SensorData_t accel;
 sIcg20660SensorData_t gyro;
 float temp;
+
+const int IMU_freq = 200;
+const int T_init = 5;
+const int t_w = 2; // in the study, a sliding time window of 2 seconds is used
+const int N = 36;
+
+constexpr int WINDOW_SIZE = t_w * IMU_freq; // 2 seconds × 200 Hz = 400 samples
+float* ax_buf = new float[WINDOW_SIZE];
+float* ay_buf = new float[WINDOW_SIZE];
+float* az_buf = new float[WINDOW_SIZE];
+int buf_index = 0;
+bool buffer_filled = false;
+float sigma_init = 0; // computed from test_static()
+int const k = 6;  //threshold multiplier
 
 //global variables for recording values over and over
 float ax_g, ay_g, az_g;
@@ -34,6 +47,7 @@ float ax_g, ay_g, az_g;
 struct data_entry {
   float x, y, z;
 };
+
 
 void log_measurement(struct data_entry avg_measurement[], int i){
   Serial.print("&X");   //& tähistus voimaldab pythoni koodil pärast vajalikku infot eraldi faili salvestada
@@ -45,42 +59,115 @@ void log_measurement(struct data_entry avg_measurement[], int i){
   Serial.println();
 }
 
-void collect_manual() {
+float compute_variance(float *arr, int samples) {
+    if (samples < 2) return 0.0;  // avoid division by zero
+
+    float mean = 0.0;
+    for (int i = 0; i < samples; i++) {
+        mean += arr[i];
+    }
+    mean /= samples;
+
+    float sq = 0.0;
+    for (int i = 0; i < samples; i++) {
+        float diff = arr[i] - mean;
+        sq += diff * diff;
+    }
+
+    return sq / (samples - 1);  // unbiased variance
+}
+
+bool is_static() {
+
+    // Add new sample to buffer
+    ax_buf[buf_index] = ax_g;
+    ay_buf[buf_index] = ay_g;
+    az_buf[buf_index] = az_g;
+
+    buf_index = (buf_index + 1) % WINDOW_SIZE;
+    if (buf_index == 0) buffer_filled = true;
+
+    // Only start checking when buffer is full
+    if (!buffer_filled) return false;
+
+    // Compute variance for each axis
+    float vx = compute_variance(ax_buf, WINDOW_SIZE);
+    float vy = compute_variance(ay_buf, WINDOW_SIZE);
+    float vz = compute_variance(az_buf, WINDOW_SIZE);
+
+    // Variance magnitude
+    float sigma = sqrt(vx*vx + vy*vy + vz*vz);
+
+    return sigma <= sigma_init;
+}
+
+void test_static() {
+  Serial.println("Running static test... keep the sensor perfectly still.");
+
+  int samples = T_init * IMU_freq;
+  float* ax_test = new float[samples];
+  float* ay_test = new float[samples];
+  float* az_test = new float[samples];
+
+  // collect samples
+  for (int i = 0; i < samples; i++) {
+    imu.getSensorData(&accel, &gyro, &temp);
+    ax_test[i] = accel.x;
+    ay_test[i] = accel.y;
+    az_test[i] = accel.z;
+    delay(1000 / IMU_freq);
+    yield();                  // let watchdog reset
+  }
+
+  // compute variances
+  float vx = compute_variance(ax_test, samples);
+  float vy = compute_variance(ay_test, samples);
+  float vz = compute_variance(az_test, samples);
+
+  // variance magnitude σ_init
+  sigma_init = k * sqrt(vx*vx + vy*vy + vz*vz);
+  Serial.println("Static border:");
+  Serial.println(sigma_init, 6  );
+}
+
+void test_manual() {
   struct data_entry avg_measurement[all_pos];
 
-  for (int i = 0; i < all_pos; i++) {
-
-    Serial.println("Type 'c' and press ENTER to start calibration on this axis.");
-    while (true) {
-      char input = get_user_input();
-      if (input == 'c' || input == 'C') break;
-      else Serial.println(">");
-    }
+  for (int i = 0; i < N; i++) {
 
     Serial.println();
     Serial.println("Recording data... Please keep sensor still.");
-    delay(2000); // anduril lastakse natuke seista, et vältida vibratsioone jms, mis tulevad kohe pärast käskluse saatmist kasutaja klaviatuurilt
+    delay(2000);
 
     float sum_x = 0, sum_y = 0, sum_z = 0;
-
-    for (int j = 0; j < measurement_amount; j++) {
+    int accepted_samples = 0;
+    for (int j = 0; accepted_samples < measurement_amount; j++) {
       read_ICG20660L();
+
+      if (!is_static()){
+        Serial.println("MEAS DISCARDED - MOVEMENT");
+        continue;  //if movement detected by quasi-static detector, then measurement disregarded
+      }
 
       sum_x += ax_g;
       sum_y += ay_g;
       sum_z += az_g;
+      accepted_samples++;
+      Serial.println("ACCEPTED SAMPLES: ");
+      Serial.println(accepted_samples);
     }
 
     avg_measurement[i].x = sum_x / measurement_amount;  //võetakse aritmeetiline keskmine kõikidest mõõtmistest ühes positsioonis, et vähendada maatriksite suurust ja minimaliseerida müra
     avg_measurement[i].y = sum_y / measurement_amount;
     avg_measurement[i].z = sum_z / measurement_amount;
-   
+  
     Serial.print("Average X: "); Serial.print(avg_measurement[i].x, 4);
     Serial.print(" Y: "); Serial.print(avg_measurement[i].y, 4);
     Serial.print(" Z: "); Serial.println(avg_measurement[i].z, 4);
 
     if (i != (all_pos - 1)){    
-      Serial.println("File log:");
+      Serial.println("File log for position");
+      Serial.print(i);
       Serial.println("--------------------------------------------------");
       log_measurement(avg_measurement, i);
       Serial.println("--------------------------------------------------");
@@ -108,7 +195,7 @@ void collect_manual() {
   }
 }
 
-void collect_servo() {
+void test_servo() {
   struct data_entry avg_measurement[all_pos];
   
   for (int axis = 0; axis < 3; axis++){
@@ -124,26 +211,28 @@ void collect_servo() {
 
     for (int i = 1; i < (pos + 1); i++) { //position 0 is ignored, because ser0067 cannot accurately hold that position
       rotate_servo(i);  //servo rotates to next position depending on i, which cycles through all positions on an axis
-      delay(2000); // waiting time to ensure that measuring platform settles
-
-      if (axis == 0) avg_measurement[i].current_axis = 'X';
-      else if (axis == 1) avg_measurement[i].current_axis = 'Y';
-      else avg_measurement[i].current_axis = 'Z';
+      delay(500); // waiting time to ensure that measuring platform settles
 
       float sum_x = 0, sum_y = 0, sum_z = 0;
-
-      for (int j = 0; j < measurement_amount; j++) { //starts measuring in this position
+      int accepted_samples = 0;   // variable needed because of the static detector
+      for (int j = 0; accepted_samples < measurement_amount; j++) { //starts measuring in this position
         read_ICG20660L();
+
+        if (!is_static()){
+          Serial.println("MEAS DISCARDED - MOVEMENT");
+          continue;  //if movement detected by quasi-static detector, then measurement disregarded
+        }
 
         sum_x += ax_g;
         sum_y += ay_g;
         sum_z += az_g;
+        accepted_samples++;
 
       }
 
-      avg_measurement[i].x = sum_x / measurement_amount;  //average is taken to minimize noise influence on calib results
-      avg_measurement[i].y = sum_y / measurement_amount;
-      avg_measurement[i].z = sum_z / measurement_amount;
+      avg_measurement[i].x = sum_x / accepted_samples;  //average is taken to minimize noise influence on calib results
+      avg_measurement[i].y = sum_y / accepted_samples;
+      avg_measurement[i].z = sum_z / accepted_samples;
 
       log_measurement(avg_measurement, i);
       Serial.println("--------------------------------------------------");
@@ -259,7 +348,7 @@ char get_user_input(){
 void setup() {
   Serial.begin(115200);
   while (!Serial);
-   delay(1000);            // give host time to start listening
+  delay(1000);            // give host time to start listening
 
   Wire.begin(SDA_pin, SCL_pin); // SDA=21, SCL=22 for ESP32
 
@@ -279,20 +368,24 @@ void loop() {
   Serial.println("Choose calibration:");
   Serial.println("1 - Handheld calib");
   Serial.println("2 - Servo-assisted calib");
-  Serial.println("3 - Debug");
+  Serial.println("3 - Static test");
+  Serial.println("4 - Debug");
   Serial.println(">");
 
   char choice = get_user_input();
 
   if (choice == '1') {
     Serial.println("&MODE=M_ACCEL");
-    collect_manual();
+    test_manual();
   }
   else if (choice == '2') {
     Serial.println("&MODE=S_ACCEL");
-    collect_servo();
+    test_servo();
   }
   else if (choice == '3') {
+    test_static();
+  }
+  else if (choice == '4') {
     debug();
   }
   else {
