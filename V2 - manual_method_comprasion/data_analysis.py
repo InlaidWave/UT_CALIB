@@ -81,6 +81,11 @@ def calibrate(data_log, params):
 
     return (T @ (K @ (data_log.T + b[:, np.newaxis]))).T  # shape (N,3)     (b is made a column vector(3;1))
 
+def percentile_mean_error(residuals, percentile=95):
+    cutoff = np.percentile(np.abs(residuals), percentile)
+    top_errors = np.abs(residuals)[np.abs(residuals) >= cutoff]
+    return np.mean(top_errors)
+
 def compare(data_log_1, data_log_2):
     magnitudes_1 = np.linalg.norm(data_log_1, axis=1)
     magnitudes_2 = np.linalg.norm(data_log_2, axis=1)
@@ -95,12 +100,23 @@ def compare(data_log_1, data_log_2):
 
     rms_error_1 = np.sqrt(np.mean(residuals_from_g_1**2))
     rms_error_2 = np.sqrt(np.mean(residuals_from_g_2**2))
+    
+    # max_error_1 = np.max(np.abs(residuals_from_g_1))
+    # max_error_2 = np.max(np.abs(residuals_from_g_2))
+
+    five_percentile_error_1 = percentile_mean_error(residuals_from_g_1, 95)
+    five_percentile_error_2 = percentile_mean_error(residuals_from_g_2, 95)
 
     print("Mean offset from g for calibrated data:", mean_error_1)
     print("Mean offset from g for uncalibrated data:", mean_error_2)
 
+    print("5 percent offset from g for calibrated data:", five_percentile_error_1)
+    print("5 percent offset from g for uncalibrated data:", five_percentile_error_2)
+
     print("fit to gravity sphere for calibrated data:", rms_error_1)
     print("fit to gravity sphere for uncalibrated data:", rms_error_2)
+
+
 
 if __name__ == "__main__":
     txt_files = list_txt_files(".")
