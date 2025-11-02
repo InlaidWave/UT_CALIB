@@ -3,6 +3,7 @@ import threading
 import time
 import serial.tools.list_ports
 import os
+import re
 
 baud_rate = 115200
 
@@ -23,7 +24,7 @@ except Exception as e:
     print(f"{e}")
     arduino_port = input("Enter COM port manually (e.g., COM6): ")    # asks user to manually enter port if not found
 
-def read_from_serial(file): 
+def read_from_serial(file, gyro_file): 
     global ready_to_send
     while True:
         if ser.in_waiting > 0:
@@ -34,8 +35,15 @@ def read_from_serial(file):
                 print(line)
             
             if len(line) > 0 and line[0] == '&':
-                file.write(line.lstrip('&') + "\n")    # writes lines marked with & into separate document, removes & symbol
+                stripped = line.lstrip('&')
+                file.write(stripped + "\n")    # writes lines marked with & into main document
                 file.flush()
+
+                # If this line looks like a gyroscope sample or gyro bias summary, mirror it to gyro file
+                # Accepted formats: GX..GY..GZ.. (case-insensitive) or GYRO_BIAS GX..GY..GZ..
+                if re.match(r"^(GX|Gx)[-+]?\d*\.?\d+(GY|Gy)[-+]?\d*\.?\d+(GZ|Gz)[-+]?\d*\.?\d+$", stripped) or stripped.startswith("GYRO_BIAS"):
+                    gyro_file.write(stripped + "\n")
+                    gyro_file.flush()
 
             if line.strip() == '>': # If arduino sends line ">", user can type
                 with lock:
@@ -61,15 +69,19 @@ try:
     os.makedirs(data_folder, exist_ok=True)  # creates the folder if doesn't exist
     file_path = os.path.join(data_folder, filename)
 
-    with open(file_path, 'w') as file:
+    gyro_filename = f"gyro_data_{timestamp}.txt"
+    gyro_file_path = os.path.join(data_folder, gyro_filename)
+
+    with open(file_path, 'w') as file, open(gyro_file_path, 'w') as gyro_file:
         # manually reset ESP32
         ser.dtr = False
         time.sleep(0.1)
         ser.dtr = True
 
         print(f"Saving data to {filename}... Press Ctrl+C to stop.")
+        print(f"(Gyro mirror: {gyro_filename})")
 
-        reader_thread = threading.Thread(target=read_from_serial, args=(file,), daemon=True)
+        reader_thread = threading.Thread(target=read_from_serial, args=(file, gyro_file), daemon=True)
         writer_thread = threading.Thread(target=write_to_serial, daemon=True)
 
         reader_thread.start()   # two threads work simultaneusly

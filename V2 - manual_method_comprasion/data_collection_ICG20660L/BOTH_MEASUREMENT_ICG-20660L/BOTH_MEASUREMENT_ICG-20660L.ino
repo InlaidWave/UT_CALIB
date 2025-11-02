@@ -49,6 +49,9 @@ struct data_entry {
   float x, y, z;
 };
 
+struct data_entry accel_measurement[all_pos];
+struct data_entry gyro_measurement[2000][all_pos];    //max 2000 samples, ie 10 seconds moving time
+
 
 void log_measurement(struct data_entry accel_measurement[], int i){
   Serial.print("&X");   //& tähistus voimaldab pythoni koodil pärast vajalikku infot eraldi faili salvestada
@@ -132,8 +135,6 @@ void test_static() {
 }
 
 void test_manual() {
-  struct data_entry accel_measurement[all_pos];
-  struct data_entry gyro_measurement[1000][all_pos];
   int gyro_counts[all_pos];
 
   for (int i = 0; i < N; i++) {
@@ -193,6 +194,10 @@ void test_manual() {
     Serial.println("Move sensor to next pose. Recording gyro...");
     gyro_count[i] = 0;
 
+    while (is_static()) {
+      read_ICG20660L();  // continuously feed samples
+    }
+
     while (!is_static() && gyro_count[i] < 1000) {
       read_ICG20660L();  // reads both accel & gyro
       gyro_measurement[gyro_count][i].x = gx;
@@ -201,9 +206,111 @@ void test_manual() {
       
       gyro_count[i]++;
     }
-    Serial.print("Recorded "); Serial.print(gyro_lengths[period]); Serial.println(" samples.");
-
+    Serial.print("Recorded "); Serial.print(gyro_count[i]); Serial.println(" samples.");
   }
+}
+
+void generate_positions() {
+  hand_total_positions = 0;
+
+  // elevation angles in degrees (like latitude)
+  int hand_elevations[hand_num_elev] = {-90, -45, 0, 45, 90};
+
+  for (int ei = 0; ei < hand_num_elev; ei++) {
+    float elev_deg = hand_elevations[ei];
+    float elev_rad = elev_deg * PI / 180.0;
+
+    int az_steps;
+    if (abs((int)elev_deg) == 90) {
+      // only one point at the poles
+      az_steps = 1;
+    } else {
+      az_steps = hand_num_az;
+    }
+
+    for (int ai = 0; ai < az_steps; ai++) {
+      float az_deg = (az_steps == 1) ? 0 : ai * (360.0 / hand_num_az);
+      float az_rad = az_deg * PI / 180.0;
+
+      // spherical → Cartesian
+      float x = cos(elev_rad) * cos(az_rad);
+      float y = cos(elev_rad) * sin(az_rad);
+      float z = sin(elev_rad);
+
+      hand_targets[hand_total_positions].x = x;
+      hand_targets[hand_total_positions].y = y;
+      hand_targets[hand_total_positions].z = z;
+      hand_total_positions++;
+    }
+  }
+}
+
+void test_guided() {
+  generate_positions();
+  data_entry avg_measurement[hand_total_positions];
+
+  Serial.print("Handheld guided calibration, total positions: ");
+  Serial.println(hand_total_positions);
+
+  for (int i = 0; i < hand_tota   l_positions; i++) {
+    Serial.print("Target position "); Serial.print(i+1); Serial.print("/");
+    Serial.println(hand_total_positions);
+
+    int meas_counter = 0;
+    while (true) {
+      meas_counter++;
+
+      if (in_position(i)) {
+
+        // wait until static detector says stable
+        int accepted_samples = 0;
+        float sum_x=0, sum_y=0, sum_z=0;
+
+        Serial.println("Type c when sensor in a stable position OR anything else to check offset.");
+        while(1){
+          if (in_position(i)) Serial.println("In position.");
+          Serial.println(">");
+          char input = get_user_input();
+          if (input == 'c' || input == 'C') break;
+        }
+        
+        while (accepted_samples < measurement_amount) {
+          read_ICG20660L();
+          if (!is_static() && meas_counter >= 425) {
+            Serial.println("Movement detected → restarting");
+            meas_counter = 0;
+            continue;
+          }
+          else {
+            if (meas_counter < 425) {
+              Serial.println("--INITIALIZING MEASUREMENT--");
+              Serial.println(meas_counter);
+              }
+            else {
+            sum_x += ax_g;
+            sum_y += ay_g;
+            sum_z += az_g;
+            accepted_samples++;
+            }
+            meas_counter++;
+          }
+        }
+
+        avg_measurement[i].x = sum_x / measurement_amount;
+        avg_measurement[i].y = sum_y / measurement_amount;
+        avg_measurement[i].z = sum_z / measurement_amount;
+
+        log_measurement(avg_measurement, i);
+        Serial.println(accepted_samples);
+        break; // move to next target
+      }
+      else {
+        Serial.print("Not aligned...");
+      }
+      delay(200);
+    }
+  }
+  Serial.println("Guided handheld calibration completed.");
 }
 
 void test_servo() {
@@ -378,9 +485,10 @@ void loop() {
   Serial.println("--------------------------------------------------");
   Serial.println("Choose calibration:");
   Serial.println("1 - Handheld calib");
-  Serial.println("2 - Servo-assisted calib");
-  Serial.println("3 - Static test");
-  Serial.println("4 - Debug");
+  Serial.println("2 - Code-assisted calib");
+  Serial.println("3 - Servo-assisted calib");
+  Serial.println("4 - Static test");
+  Serial.println("5 - Debug");
   Serial.println(">");
 
   char choice = get_user_input();
