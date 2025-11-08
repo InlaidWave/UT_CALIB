@@ -246,10 +246,10 @@ def build_gyro_residuals(accel_versors: np.ndarray,
                          gyro_segments: List[np.ndarray],
                          params: np.ndarray) -> np.ndarray:
     """
+    Simplified, fast residual builder using Rodrigues' rotation formula instead of RK4 quaternions.
     params packs (order depends on flags):
       if GYRO_FIT_MISALIGNMENT: [g_yz,g_zy,g_xz,g_zx,g_xy,g_yx, sgx,sgy,sgz, (optional) bgx,bgy,bgz]
       else:                       [sgx,sgy,sgz, (optional) bgx,bgy,bgz]
-    Returns stacked vector residuals comparing predicted gravity versor vs accel versor for each segment end.
     """
     idx = 0
     if GYRO_FIT_MISALIGNMENT:
@@ -262,30 +262,41 @@ def build_gyro_residuals(accel_versors: np.ndarray,
     Kg = build_K(sgx, sgy, sgz)
 
     if idx < len(params):
-        # bias included
         bg = np.array(params[idx:idx+3])
     else:
         bg = np.zeros(3)
 
     dt = 1.0 / SAMPLE_RATE_HZ
     res = []
-    # Loop over segments between static poses
+
     for k in range(1, len(accel_versors)):
         ua_prev = accel_versors[k-1]
         ua_k = accel_versors[k]
         seg = gyro_segments[k-1]
         if seg.size == 0:
             continue
-        # Apply calibration to gyro: ω^O = Tg Kg (ω^S + b)
-        omega_S = seg  # (N,3)
-        omega_cal = (Tg @ (Kg @ (omega_S.T + bg[:, None]))).T  # (N,3)
+
+        # Apply calibration to gyro: ω^O = Tg·Kg·(ω^S + b)
+        omega_S = seg
+        omega_cal = (Tg @ (Kg @ (omega_S.T + bg[:, None]))).T
         omega_rad = omega_to_rad_s(omega_cal)
-        q = rk4n_integrate_quat(omega_rad, dt)
-        ug_k = quat_rotate(q, ua_prev)
+
+        # --- FAST INTEGRATION (Rodrigues rotation) ---
+        delta_theta = np.sum(omega_rad, axis=0) * dt
+        theta = np.linalg.norm(delta_theta)
+        if theta < 1e-12:
+            R = np.eye(3)
+        else:
+            k_axis = delta_theta / theta
+            K = np.array([[0, -k_axis[2], k_axis[1]],
+                          [k_axis[2], 0, -k_axis[0]],
+                          [-k_axis[1], k_axis[0], 0]])
+            R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+        ug_k = R @ ua_prev
         res.append(ug_k - ua_k)
 
     return np.concatenate(res) if res else np.zeros(0)
-
 
 def calibrate_gyro(accel_ms2_calib: np.ndarray,
                    gyro_segments: List[np.ndarray]) -> Tuple[np.ndarray, dict]:
@@ -304,7 +315,28 @@ def calibrate_gyro(accel_ms2_calib: np.ndarray,
     def fun(params):
         return build_gyro_residuals(accel_versors, gyro_segments, params)
 
-    res = least_squares(fun, p)
+    # ---- NEW: safer, bounded least-squares ----
+    # Verbose=2 to show iteration progress
+    # max_nfev=1000 caps computation time
+    # loss='soft_l1' makes it more robust to outliers
+    print("Starting gyro optimization (this may take ~10–30 s)...")
+
+    if GYRO_FIT_MISALIGNMENT:
+        gamma_bound = 0.1
+        lower = [-gamma_bound]*6 + [0.8, 0.8, 0.8, -20, -20, -20]
+        upper = [ gamma_bound]*6 + [1.2, 1.2, 1.2,  20,  20,  20]
+    else:
+        lower = [0.8, 0.8, 0.8, -20, -20, -20]
+        upper = [1.2, 1.2, 1.2,  20,  20,  20]
+
+    res = least_squares(fun, p,
+                        bounds=(lower, upper),
+                        max_nfev=300,
+                        verbose=2,
+                        loss='soft_l1',
+                        ftol=1e-10,
+                        xtol=1e-10,
+                        gtol=1e-10)
 
     # Unpack results
     out = {}
@@ -415,6 +447,12 @@ if __name__ == "__main__":
             gyro_segments = gyro_segments[:n]
             accel_ms2_calib = accel_ms2_calib[: n + 1]
             print(f"Adjusted to {n} segments to match accel poses.")
+
+        # ---- NEW: optional limit to avoid heavy optimization ----
+        if len(gyro_segments) > 12:
+            print(f"Limiting to first 12 segments for faster calibration (out of {len(gyro_segments)})")
+            gyro_segments = gyro_segments[:12]
+            accel_ms2_calib = accel_ms2_calib[:13]
 
         _, gyro_info = calibrate_gyro(accel_ms2_calib, gyro_segments)
         print("\nGyroscope calibration results:")

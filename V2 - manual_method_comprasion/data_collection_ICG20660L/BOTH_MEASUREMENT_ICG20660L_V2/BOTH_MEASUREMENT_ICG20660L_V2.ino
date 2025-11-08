@@ -9,7 +9,7 @@ constexpr int   measurement_amount = 800;         // samples per pose
 constexpr int   IMU_freq = 200;                   // Hz
 constexpr int   T_init   = 60;                     // seconds, sliding window for static detector
 constexpr int   t_w      = 2;                     // seconds, sliding window for static detector
-constexpr int   N        = 38;                    // number of manual poses (you can adjust)
+constexpr int   N        = 25;                    // number of manual poses (you can adjust)
 constexpr int   k_thresh = 6;                     // static threshold multiplier
 
 // -------------------- ESP32/IMU comms --------------------
@@ -255,8 +255,8 @@ void test_manual() {
     Serial.print(i);
     Serial.println("--------------------------------------------------");
     log_accel_sample(avg_ax, avg_ay, avg_az);
-    Serial.println("&TEMP:");
-    Serial.print(temp, 2);
+    Serial.print("&TEMP:");
+    Serial.println(temp, 2);
     Serial.println("--------------------------------------------------");
 
     Serial.println("Send 'c' to continue, 'r' to calibrate again on this position.");
@@ -334,7 +334,7 @@ void generate_positions() {
       az_steps = 1;
     } else {
       // equator: 30 points (every 12°)
-      az_steps = 30;
+      az_steps = 8;
     }
 
     for (int ai = 0; ai < az_steps; ai++) {
