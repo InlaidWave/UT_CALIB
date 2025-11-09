@@ -1,0 +1,17 @@
+data for assisted calib on testbench data fit:
+parameters: -0.003596 0.135229 0.154102 0.993028 0.997485 0.989259 -0.000494 0.090888 0.000310 0.008180 0.092929 0.008775
+Mean offset from g for calibrated data: 0.005352776510547342
+Mean offset from g for uncalibrated data: 0.04588647870918264
+5 percent offset from g for calibrated data: 0.06596612022772508
+5 percent offset from g for uncalibrated data: 0.2158109920838358
+fit to gravity sphere for calibrated data: 0.03568436692646649
+fit to gravity sphere for uncalibrated data: 0.1147104219628595
+
+data for unassisted calib on testbench data fit:
+parameters: -0.006220 0.142443 0.168896 0.993601 0.994110 0.990581 0.076151 0.043688 0.077435 0.022664 0.044583 0.026905
+Mean offset from g for calibrated data: 0.00038377125627203016
+Mean offset from g for uncalibrated data: 0.04588647870918264
+5 percent offset from g for calibrated data: 0.06788373934498138
+5 percent offset from g for uncalibrated data: 0.2158109920838358
+fit to gravity sphere for calibrated data: 0.041030734444657
+fit to gravity sphere for uncalibrated data: 0.1147104219628595

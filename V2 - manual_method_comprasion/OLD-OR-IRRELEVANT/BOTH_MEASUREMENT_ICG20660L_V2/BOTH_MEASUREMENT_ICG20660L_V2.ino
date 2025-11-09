@@ -1,4 +1,5 @@
-#include <Arduino.h>
+#include <Arduino.h>1 of 35
+
 #include "Wire.h"
 #include "DFRobot_ICG20660L.h"
 
@@ -21,6 +22,17 @@ DFRobot_ICG20660L_IIC imu(0x69, &Wire);
 sIcg20660SensorData_t accel;
 sIcg20660SensorData_t gyro;
 float temp = 0.0f;
+
+// =================== MANUAL OVERRIDES ===================
+constexpr bool use_manual_sigma_and_bias = true;
+
+// Manual static threshold (σ_init)
+constexpr float sigma_init_m = 0.000100f;
+
+// Manual gyro biases (units: deg/s or rad/s, depending on IMU output)
+constexpr float gyro_bias_m[3] = { 2.030696f, 0.856915f, 0.323637f };
+
+// =========================================================
 
 // -------------------- Globals --------------------
 float ax, ay, az;
@@ -194,7 +206,7 @@ void test_static() {
 
   // Compute static threshold σ_init
   sigma_init = k_thresh * sqrtf(vx*vx + vy*vy + vz*vz);
-  Serial.println(F("Static border:"));
+  Serial.print(F("&STATIC"));
   Serial.println(sigma_init, 6);
 
   // Report gyro bias (mean over static period)
@@ -207,11 +219,17 @@ void test_static() {
   Serial.print(F("GY")); Serial.print(bgy, 6);
   Serial.print(F("GZ")); Serial.println(bgz, 6);
   
-  Serial.println("&TEMP:");
-  Serial.print(temp, 2);
+  Serial.print("&TEMP");
+  Serial.println(temp, 2);
 }
 
 void test_manual() {
+//temporary!!!!!!!
+  unsigned long last_time = micros();
+  int count = 0;
+  unsigned long start_time = micros();
+//temporary!!!!!!!
+
   int gyro_counts[N];
 
   if (sigma_init == 0.0f) {
@@ -287,13 +305,30 @@ void test_manual() {
       read_ICG20660L();  // continuously feed samples
     }
 
-    while (!is_static() && gyro_counts[i] < 1000) {
-      read_ICG20660L();  // reads both accel & gyro
+    while (!is_static() && gyro_counts[i] < 2000) {
+      // read_ICG20660L();  // reads both accel & gyro
 
-      // Log each gyro sample for off-board processing
+      // // Log each gyro sample for off-board processing
+      // log_gyro_sample(gx, gy, gz);
+
+      // gyro_counts[i]++;
+
+      read_ICG20660L();
       log_gyro_sample(gx, gy, gz);
-
       gyro_counts[i]++;
+      count++;
+
+      // Timing check every 200 samples
+      if (count == 200) {
+        unsigned long now = micros();
+        float elapsed = (now - start_time) / 1e6;  // seconds
+        float freq = count / elapsed;
+        Serial.print("Actual gyro sample rate: ");
+        Serial.print(freq);
+        Serial.println(" Hz");
+        count = 0;
+        start_time = now;
+      }
     }
     Serial.println("&MODE=GYRO_END");
     Serial.print("Recorded "); Serial.print(gyro_counts[i]); Serial.println(" samples.");
@@ -372,6 +407,11 @@ void test_guided() {
   Serial.print("Handheld guided calibration, total positions: ");
   Serial.println(hand_total_positions);
 
+  unsigned long last_time = micros();
+  int count = 0;
+  unsigned long start_time = micros();
+  int gyro_counts[N];
+
   for (int i = 0; i < hand_total_positions; i++) {
     Serial.print("Target position "); Serial.print(i+1); Serial.print("/");
     Serial.println(hand_total_positions);
@@ -386,37 +426,36 @@ void test_guided() {
         float sum_x=0, sum_y=0, sum_z=0;
 
         Serial.println("Type c when sensor in a stable position OR anything else to check offset.");
-        while(1){
+        while (1) {
           if (in_position(i)) Serial.println("In position.");
           Serial.println(">");
           char input = get_user_input();
           if (input == 'c' || input == 'C') break;
         }
         
+        // ----- STATIC ACCEL STAGE -----
         while (accepted_samples < measurement_amount) {
           read_ICG20660L();
           if (!is_static() && meas_counter >= 425) {
             Serial.println("Movement detected → restarting");
             meas_counter = 0;
             continue;
-          }
-          else {
+          } else {
             if (meas_counter < 425) {
               Serial.println("--INITIALIZING MEASUREMENT--");
               Serial.println(meas_counter);
-              }
-            else {
-            sum_x += ax;
-            sum_y += ay;
-            sum_z += az;
-            accepted_samples++;
+            } else {
+              sum_x += ax;
+              sum_y += ay;
+              sum_z += az;
+              accepted_samples++;
 
-            Serial.println("X");
-            Serial.print(ax);
-            Serial.print("|Y");
-            Serial.print(ay);
-            Serial.print("|Z");
-            Serial.print(az);
+              Serial.println("X");
+              Serial.print(ax);
+              Serial.print("|Y");
+              Serial.print(ay);
+              Serial.print("|Z");
+              Serial.print(az);
             }
             meas_counter++;
           }
@@ -430,34 +469,87 @@ void test_guided() {
         Serial.print(i);
         Serial.println("--------------------------------------------------");
         log_accel_sample(avg_ax, avg_ay, avg_az);
+        Serial.print("&TEMP:");
+        Serial.println(temp, 2);
         Serial.println("--------------------------------------------------");
-
         Serial.println(accepted_samples);
         break; // move to next target
-      }
-      else {
+      } else {
         Serial.print("Not aligned...");
       }
       delay(200);
     }
+
+    // ----- MOTION STAGE -----
+    Serial.println("Move sensor to next pose. Recording gyro...");
+    gyro_counts[i] = 0;
+    Serial.println("&MODE=GYRO_START");
+
+    while (is_static()) {
+      read_ICG20660L();  // keep feeding until motion begins
+    }
+
+    while (!is_static() && gyro_counts[i] < 2000) {
+      read_ICG20660L();
+      log_gyro_sample(gx, gy, gz);
+      gyro_counts[i]++;
+      count++;
+
+      // print actual sample rate every 200 samples
+      if (count == 200) {
+        unsigned long now = micros();
+        float elapsed = (now - start_time) / 1e6;  // seconds
+        float freq = count / elapsed;
+        Serial.print("Actual gyro sample rate: ");
+        Serial.print(freq);
+        Serial.println(" Hz");
+        count = 0;
+        start_time = now;
+      }
+    }
+
+    Serial.println("&MODE=GYRO_END");
+    Serial.print("Recorded "); Serial.print(gyro_counts[i]); Serial.println(" samples.");
   }
+
   Serial.println("Guided handheld calibration completed.");
 }
 
-void read_ICG20660L(){
+// void read_ICG20660L(){
+//   imu.getSensorData(&accel, &gyro, &temp);
+
+//   // accelerometer
+//   ax = accel.x;
+//   ay = accel.y;
+//   az = accel.z;
+
+//   // gyroscope
+//   gx = gyro.x;
+//   gy = gyro.y;
+//   gz = gyro.z;
+
+//   delay(1000/IMU_freq); //depending on user chosen measuring frequency, a delay is found
+// }
+
+void read_ICG20660L() { // this ensures constant sampling rate 
+  static unsigned long last_time = 0;
+  const unsigned long period_us = 1000000UL / IMU_freq;  // ~6667 µs for 150 Hz
+
+  // Wait until period elapsed (ensures one new sample per call)
+  while (micros() - last_time < period_us) {
+    // small yield to avoid watchdog issues
+    delayMicroseconds(50);
+  }
+  last_time = micros();
+
   imu.getSensorData(&accel, &gyro, &temp);
 
-  // accelerometer
   ax = accel.x;
   ay = accel.y;
   az = accel.z;
-
-  // gyroscope
   gx = gyro.x;
   gy = gyro.y;
   gz = gyro.z;
-
-  delay(1000/IMU_freq); //depending on user chosen measuring frequency, a delay is found
 }
 
 char get_user_input(){
@@ -495,7 +587,20 @@ void setup() {
   }
   imu.enableSensor(0b00111111); // Bits 0-5 = gyro XYZ + accel XYZ
 
-  Serial.println("ICG-20660L initialized.");
+  Serial.println("ICG-2no0660L initialized.");
+
+  // Apply manual values if requested
+  if (use_manual_sigma_and_bias) {
+    Serial.print("&STATIC");
+    Serial.println(sigma_init_m, 6);
+    sigma_init = sigma_init_m;
+
+    // Apply manual biases
+    Serial.println("Using manual gyro biases: ");
+    Serial.print(F("&GYRO_BIAS GX")); Serial.print(gyro_bias_m[0], 6);
+    Serial.print(F("GY")); Serial.print(gyro_bias_m[1], 6);
+    Serial.print(F("GZ")); Serial.println(gyro_bias_m[2], 6);
+  }
 }
 
 void loop() {
