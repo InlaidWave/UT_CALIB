@@ -337,7 +337,8 @@ if __name__ == "__main__":
         print("\nUsing provided accelerometer calibration parameters.")
         accel_cal = accel_apply(accel_raw, acc_p)
 
-    compare_cross_calibration("DATA/calib_data_20250827-1545.txt", acc_p)
+    # compare_cross_calibration("DATA/calib_data_20250827-1545.txt", acc_p)
+    plot_accel_sphere(accel_cal, accel_raw)
 
     # --------------------
     # Gyroscope calibration

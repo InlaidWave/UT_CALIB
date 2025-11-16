@@ -87,7 +87,7 @@ def accel_find_params(data):
 def accel_apply(data,p):
     bx,by,bz,sx,sy,sz,a_yz,a_zy,a_zx=p
     b=np.array([bx,by,bz]); K=build_K(sx,sy,sz); T=build_Ta(a_yz,a_zy,a_zx)
-    return (T@(K@(data.T+b[:,None]))).T
+    return (T@(K@(data.T-b[:,None]))).T
 
 def accel_summary(calib_ms2: np.ndarray, raw_ms2: np.ndarray):
     def pct_mean_error(residuals, percentile=95):
@@ -373,7 +373,7 @@ if __name__ == "__main__":
         print("\nUsing provided accelerometer calibration parameters.")
         accel_cal = accel_apply(accel_raw, acc_p)
 
-    compare_cross_calibration("DATA/calib_data_20250827-1545.txt", acc_p)
+    compare_cross_calibration("DATA/big_turntable_test_sample.txt", acc_p)
 
 # =========================
 # Gyroscope calibration

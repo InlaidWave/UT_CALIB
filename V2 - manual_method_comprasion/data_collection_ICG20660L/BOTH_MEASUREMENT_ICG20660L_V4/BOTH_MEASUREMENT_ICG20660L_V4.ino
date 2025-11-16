@@ -7,7 +7,10 @@
 constexpr float g_exact = 9.81735f; // keep if you later convert to m/s^2
 constexpr int   increment_angle = 15;
 constexpr int   measurement_amount = 800;         // samples per pose
-constexpr int   IMU_freq = 70;                   // Hz
+
+constexpr int ACCEL_FREQ = 200;   // accelerometer calibration sampling rate
+constexpr int GYRO_FREQ  = 70;    // gyro calibration sampling rate
+
 constexpr int   T_init   = 120;                     // seconds, static test length
 constexpr int   t_w      = 2;                     // seconds, sliding window for static detector
 constexpr int   N        = 26;                    // number of manual poses (you can adjust)
@@ -42,7 +45,7 @@ float avg_ax, avg_ay, avg_az;
 float gx, gy, gz;
 
 // Static detector buffers and params(fixed-size, no heap)
-constexpr int WINDOW_SIZE = t_w * IMU_freq;       // 2 s × 200 Hz = 400
+constexpr int WINDOW_SIZE = t_w * ACCEL_FREQ;       // 2 s × 200 Hz = 400
 
 static float ax_buf[WINDOW_SIZE];
 static float ay_buf[WINDOW_SIZE];
@@ -85,7 +88,7 @@ volatile uint32_t imu_counter = 0;
 
 // Interrupt Service Routine (ISR)
 void IRAM_ATTR onImuTimer() {
-  tick_count++;           // count 200 Hz ticks
+  tick_count++;           // count 70 Hz ticks
   sample_ready = true;    // flag: one sample due
 }
 // =================== STATIC TEST ===================
@@ -132,11 +135,21 @@ bool is_static() {
     return sigma <= sigma_init;
 }
 
+static inline void wait_for_accel_sample() {
+  static uint32_t last = 0;
+  const uint32_t period = 1000000UL / ACCEL_FREQ; // 200 Hz = 5000 µs
+
+  while (micros() - last < period) {
+    // do nothing
+  }
+  last = micros();
+}
+
 // void test_static() {
 //   Serial.println("Running static test... keep the sensor perfectly still.");
 
 //   constexpr int samples = T_init * IMU_freq;
-//   static float ax_test[samples];
+//   static float ax_test[samples];imu_freq
 //   static float ay_test[samples];
 //   static float az_test[samples];
 //   // also capture gyro for bias estimation
@@ -180,7 +193,7 @@ bool is_static() {
 void test_static() {
   Serial.println(F("Running static test... keep the sensor perfectly still."));
 
-  const int samples = T_init * IMU_freq;
+  const int samples = T_init * GYRO_FREQ;
   float mean_ax = 0, mean_ay = 0, mean_az = 0;
   float M2_ax = 0, M2_ay = 0, M2_az = 0;  // for variance calculation
   float sum_gx = 0, sum_gy = 0, sum_gz = 0;
@@ -188,7 +201,7 @@ void test_static() {
 
   // collect samples and compute mean + variance incrementally
   for (int i = 0; i < samples; i++) {
-    read_ICG20660L();  // updates ax, ay, az, gx, gy, gz
+    read_ICG20660L(true);  // updates ax, ay, az, gx, gy, gz
 
     // Gyro bias accumulation
     sum_gx += gx;
@@ -242,7 +255,8 @@ void record_static_accel(float &out_ax, float &out_ay, float &out_az) {
   int meas_counter = 0;
 
   while (accepted_samples < measurement_amount) {
-    read_ICG20660L();
+    wait_for_accel_sample();
+    read_ICG20660L(false);
     meas_counter++;
 
     if (!is_static() && meas_counter >= WINDOW_SIZE) {
@@ -286,13 +300,13 @@ int record_gyro_motion(bool if_guided, int i) {
   Serial.println("&MODE=GYRO_START");
 
   while (is_static()) {
-    read_ICG20660L(); // wait for motion
+    read_ICG20660L(false); // wait for motion
   }
 
   unsigned long start_time = micros();
 
   while (!is_static() && gyro_samples < 2000) {
-    read_ICG20660L();
+    read_ICG20660L(true);
     log_gyro_sample(gx, gy, gz);
   
 
@@ -330,13 +344,13 @@ void test_manual() {
     Serial.println("Recording static data...");
     record_static_accel(avg_ax, avg_ay, avg_az);
 
-    // Serial.println("Send 'c' to continue, 'r' to redo this position.");
-    // Serial.print(">");
-    // while (true) {
-    //   char ch = get_user_input();
-    //   if (ch == 'c' || ch == 'C') break;
-    //   if (ch == 'r' || ch == 'R') { i--; break; }
-    // }
+    Serial.println("Send 'c' to continue, 'r' to redo this position.");
+    Serial.print(">");
+    while (true) {
+      char ch = get_user_input();
+      if (ch == 'c' || ch == 'C') break;
+      if (ch == 'r' || ch == 'R') { i--; break; }
+    }
 
     record_gyro_motion(0, i);
   }
@@ -414,10 +428,6 @@ void test_guided() {
   Serial.print("Guided calibration, total positions: ");
   Serial.println(hand_total_positions);
 
-  if (!in_position) {
-    Serial.print("Starting first guidance.");
-  }
-
   for (int i = 0; i < hand_total_positions; i++) {
     Serial.print("Target position "); Serial.print(i+1);
     Serial.print("/"); Serial.println(hand_total_positions);
@@ -431,40 +441,53 @@ void test_guided() {
 
 // =========================================================
 
-// void read_ICG20660L(){
+// void read_ICG20660L() {
+//   // Wait until the hardware timer says a sample is ready
+//   while (!sample_ready) {
+//     // short sleep prevents busy-wait lockups
+//     delayMicroseconds(10);
+//   }
+
+//   // Clear the flag atomically
+//   portENTER_CRITICAL(&timerMux);
+//   sample_ready = false;
+//   portEXIT_CRITICAL(&timerMux);
+
+//   // Perform the actual IMU read (takes ~1 ms on I2C)
 //   imu.getSensorData(&accel, &gyro, &temp);
 
-//   // accelerometer
-//   ax = accel.x;
-//   ay = accel.y;
-//   az = accel.z;
-
-//   // gyroscope
-//   gx = gyro.x;
-//   gy = gyro.y;
-//   gz = gyro.z;
-
-//   delay(1000/IMU_freq); //depending on user chosen measuring frequency, a delay is found
+//   ax = accel.x; ay = accel.y; az = accel.z;
+//   gx = gyro.x; gy = gyro.y; gz = gyro.z;
 // }
 
+void read_ICG20660L(bool for_gyro) {
 
-void read_ICG20660L() {
-  // Wait until the hardware timer says a sample is ready
-  while (!sample_ready) {
-    // short sleep prevents busy-wait lockups
-    delayMicroseconds(10);
+  if (for_gyro) {
+    // ----------- TIMER-SYNCHRONIZED ACCEL + GYRO READ -------------
+    while (!sample_ready) delayMicroseconds(10);
+
+    portENTER_CRITICAL(&timerMux);
+    sample_ready = false;
+    portEXIT_CRITICAL(&timerMux);
+
+    imu.getSensorData(&accel, &gyro, &temp);
+
+    ax = accel.x;
+    ay = accel.y;
+    az = accel.z;
+
+    gx = gyro.x;
+    gy = gyro.y;
+    gz = gyro.z;
   }
+  else {
+    // ----------- ACCEL-ONLY READ (free-running) -------------
+    imu.getSensorData(&accel, &gyro, &temp);
 
-  // Clear the flag atomically
-  portENTER_CRITICAL(&timerMux);
-  sample_ready = false;
-  portEXIT_CRITICAL(&timerMux);
-
-  // Perform the actual IMU read (takes ~1 ms on I2C)
-  imu.getSensorData(&accel, &gyro, &temp);
-
-  ax = accel.x; ay = accel.y; az = accel.z;
-  gx = gyro.x; gy = gyro.y; gz = gyro.z;
+    ax = accel.x;
+    ay = accel.y;
+    az = accel.z;
+  }
 }
 
 char get_user_input(){
@@ -505,14 +528,14 @@ void setup() {
   Serial.println("ICG-2no0660L initialized.");
 
   // ---- Hardware timer for stable IMU sampling ----
-  const uint32_t period_us = 1000000UL / IMU_freq;  // e.g. 5000 µs for 200 Hz
+  const uint32_t period_us = 1000000UL / GYRO_FREQ;  // e.g. 5000 µs for 200 Hz
   imu_timer = timerBegin(0, 80, true);              // 80 MHz / 80 = 1 µs tick
   timerAttachInterrupt(imu_timer, &onImuTimer, true);
   timerAlarmWrite(imu_timer, period_us, true);      // periodic interrupt
   timerAlarmEnable(imu_timer);
 
   Serial.print("Hardware timer started at ");
-  Serial.print(IMU_freq);
+  Serial.print(GYRO_FREQ);
   Serial.println(" Hz");
 
   // Apply manual values if requested
