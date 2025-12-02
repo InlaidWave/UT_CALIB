@@ -3,11 +3,31 @@
 #include "DFRobot_ICG20660L.h"
 
 // ---------------- IMU SETTINGS ----------------
-const int SDA_PIN = 21;
-const int SCL_PIN = 22;
+const int SDA_PIN = 26;
+const int SCL_PIN = 27;
 const int IMU_ADDR = 0x69;
-const int IMU_FREQ = 200;     // Hz (gyro sample rate)
+const int IMU_FREQ = 70;     // Hz (gyro sample rate)
 
+float gyro_bias_x = 0;
+float gyro_bias_y = 0;
+float gyro_bias_z = 0;
+
+String BIAS_STRING = "&GYRO_BIAS GX2.207271GY1.248071GZ0.380602";
+
+void loadGyroBias(String s) {
+  const char* c = s.c_str();   // convert Arduino String → C string
+
+  float x, y, z;
+
+  // Read: GX<float>GY<float>GZ<float>
+  if (sscanf(c, "%*s GX%fGY%fGZ%f", &x, &y, &z) == 3) {
+    gyro_bias_x = x;
+    gyro_bias_y = y;
+    gyro_bias_z = z;
+  } else {
+    Serial.println("Bias parse failed!");
+  }
+}
 DFRobot_ICG20660L_IIC imu(IMU_ADDR, &Wire);
 sIcg20660SensorData_t accel;
 sIcg20660SensorData_t gyro;
@@ -65,6 +85,16 @@ void readIMU() {
   portEXIT_CRITICAL(&timerMux);
 
   imu.getSensorData(&accel, &gyro, &temp);
+
+  // -------- SUBTRACT GYRO BIAS HERE --------
+  gyro.x -= gyro_bias_x;
+  gyro.y -= gyro_bias_y;
+  gyro.z -= gyro_bias_z;
+  // -----------------------------------------
+}
+
+void clearSerial() {
+  while (Serial.available()) Serial.read();
 }
 
 // ---------------- GYRO MOTION RECORDING ----------------
@@ -80,13 +110,13 @@ void record_gyro_rotation(float rotate_deg, float speed_deg_s) {
 
   Serial.println("&MODE=GYRO_START");
 
-  float start_angle = 0;
-  float end_angle = rotate_deg;
+  float start_angle = 180;
+  float end_angle = 360;
 
   float dt = 1.0f / IMU_FREQ;
   float step_deg = speed_deg_s * dt;
 
-  if (step_deg < 0.5) step_deg = 0.5;
+  if (step_deg < 0.143) step_deg = 0.143;
   if (step_deg > 5.0) step_deg = 5.0;
 
   float angle = start_angle;
@@ -110,15 +140,6 @@ void record_gyro_rotation(float rotate_deg, float speed_deg_s) {
     sample_count++;
   }
 
-  // Final IMU samples after stop
-  for (int i = 0; i < 50; i++) {
-    readIMU();
-    Serial.print("&GX"); Serial.print(gyro.x, 4);
-    Serial.print("GY");  Serial.print(gyro.y, 4);
-    Serial.print("GZ");  Serial.println(gyro.z, 4);
-    sample_count++;
-  }
-
   unsigned long end_time = micros();
   float freq = sample_count / ((end_time - start_time) / 1e6);
 
@@ -133,10 +154,16 @@ void record_gyro_rotation(float rotate_deg, float speed_deg_s) {
 
 void setup() {
   Serial.begin(250000);
-  delay(1000);
+  delay(500);  // IMPORTANT: give USB time to enumerate
+  while (!Serial) {
+      delay(10);
+  }
+  Serial.println("Serial connected!");
 
   // Servo setup
-  ledcAttach(SERVO_PIN, SERVO_FREQ, SERVO_RES);
+  ledcSetup(SERVO_CH, SERVO_FREQ, SERVO_RES);
+  ledcAttachPin(SERVO_PIN, SERVO_CH);
+
 
   // IMU setup
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -149,6 +176,12 @@ void setup() {
   timerAlarmWrite(imu_timer, 1000000UL / IMU_FREQ, true);
   timerAlarmEnable(imu_timer);
 
+  loadGyroBias(BIAS_STRING);
+
+  Serial.print("Bias X = "); Serial.println(gyro_bias_x, 6);
+  Serial.print("Bias Y = "); Serial.println(gyro_bias_y, 6);
+  Serial.print("Bias Z = "); Serial.println(gyro_bias_z, 6);
+
   Serial.println("System ready.");
 }
 
@@ -156,18 +189,50 @@ void setup() {
 // ---------------- LOOP ----------------
 
 void loop() {
-  Serial.println("Enter rotation angle (deg):");
-  while (!Serial.available()) delay(10);
 
-  float angle = Serial.parseFloat();
+  float angle = 360;   // you can change this if needed
 
-  Serial.println("Enter speed (deg/s):");
-  while (!Serial.available()) delay(10);
+  Serial.println("Press ENTER to start...");
+  Serial.print(">");
+  clearSerial();
+  while (Serial.available() == 0) {
+      delay(10);
+  }
+  clearSerial();
+  Serial.println();
+  Serial.println("Starting now!");
 
-  float speed = Serial.parseFloat();
+  for (int repeat = 1; repeat <= 5; repeat++) {
+    Serial.print("\n=== REPEAT SET ");
+    Serial.print(repeat);
+    Serial.println(" / 5 ===");
 
-  Serial.print("Rotating "); Serial.print(angle);
-  Serial.print(" degrees at "); Serial.print(speed); Serial.println(" deg/s");
+    for (int i = 0; i < 10; i++) {
 
-  record_gyro_rotation(angle, speed);
+      float speed = 10 + i * 10;     // 10, 20, 30, ..., 100 deg/s
+
+      Serial.println("\n------------------------------------");
+      Serial.print("&R"); Serial.print(i+1);
+      Serial.print("S"); Serial.print(repeat);
+      Serial.print("V"); Serial.println(speed);
+      Serial.println("------------------------------------");
+
+      // Return servo to zero
+      Serial.println("Centering servo...");
+      servo_goto(180);
+      delay(1500);
+
+      // Stabilize IMU
+      for (int k = 0; k < 10; k++) readIMU();
+
+      // Execute run
+      record_gyro_rotation(angle, speed);
+
+      // Rest between runs
+      delay(500);
+    }
+  }
+
+  Serial.println("\n===== ALL 5 × 10 RUNS COMPLETE =====");
+  while (1) delay(10);   // stop forever
 }
