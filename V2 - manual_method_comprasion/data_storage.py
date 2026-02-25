@@ -64,7 +64,7 @@ try:
 
     timestamp = time.strftime('%Y%m%d-%H%M')    # unique timestamp so new file created every time data is measured
     filename = f"calib_data_{timestamp}.txt"
-    data_folder = "DATA"    # assigns separate folder, where all calibration data is saved in .txt files
+    data_folder = "SERVO_DATA"    # assigns separate folder, where all calibration data is saved in .txt files
     os.makedirs(data_folder, exist_ok=True)  # creates the folder if doesn't exist
     file_path = os.path.join(data_folder, filename)
 

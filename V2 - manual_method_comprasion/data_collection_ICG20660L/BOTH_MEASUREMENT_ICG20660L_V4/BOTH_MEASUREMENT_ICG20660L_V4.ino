@@ -1,4 +1,4 @@
-#include <Arduino.h>1 of 35
+#include <Arduino.h>
 
 #include "Wire.h"
 #include "DFRobot_ICG20660L.h"
@@ -517,7 +517,7 @@ void setup() {
   while (!Serial);
   delay(1000);            // give host time to start listening
 
-  Wire.begin(SDA_pin, SCL_pin); // SDA=21, SCL=22 for ESP32
+  Wire.begin(SDA_pin, SCL_pin);
 
   if (imu.begin() != 0) {
     Serial.println("Failed to initialize ICG-20660L!");
@@ -525,7 +525,7 @@ void setup() {
   }
   imu.enableSensor(0b00111111); // Bits 0-5 = gyro XYZ + accel XYZ
 
-  Serial.println("ICG-2no0660L initialized.");
+  Serial.println("ICG-20660L initialized.");
 
   // ---- Hardware timer for stable IMU sampling ----
   const uint32_t period_us = 1000000UL / GYRO_FREQ;  // e.g. 5000 µs for 200 Hz
@@ -555,9 +555,10 @@ void setup() {
 void loop() {
   Serial.println("--------------------------------------------------");
   Serial.println("Choose calibration:");
-  Serial.println("1 - Handheld calib");
+  Serial.println("1 - Manual calib");
   Serial.println("2 - Code-assisted calib");
-  Serial.println("3 - Static test");
+  Serial.println("3 - Turntable calib");
+  Serial.println("4 - Static test");
   Serial.println(">");
 
   char choice = get_user_input();
@@ -571,6 +572,10 @@ void loop() {
     test_guided();
   }
   else if (choice == '3') {
+    Serial.println("&MODE=T_ACCEL");
+    test_manual();
+  }
+  else if (choice == '4') {
     test_static();
   }
   else {
