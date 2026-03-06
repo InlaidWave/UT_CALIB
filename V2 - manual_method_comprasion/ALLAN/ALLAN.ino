@@ -20,8 +20,8 @@ const int SCL_PIN = 27;
 const uint8_t IMU_ADDR = 0x69;
 
 const int IMU_FREQ = 70;                    // Hz sampling rate (timer driven)
-const unsigned long PRE_RECORD_DELAY_MS = 5000; // 5 seconds before recording starts
-const unsigned long RECORD_DURATION_SEC = 1800;  // seconds to record after delay; 0 = infinite
+const unsigned long PRE_RECORD_DELAY_MS = 15000; // 5 seconds before recording starts
+const unsigned long RECORD_DURATION_SEC = 3600;  // seconds to record after delay; 0 = infinite
 
 // Serial baud
 const uint32_t SERIAL_BAUD = 250000;

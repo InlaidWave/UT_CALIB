@@ -30,7 +30,7 @@ def read_from_serial(file, accel_file):
         if ser.in_waiting > 0:
             line = ser.readline().decode('utf-8', errors='ignore').rstrip() # Transforms line into utf-8 characters from bits, ignores faulty bitlines and strips newline
             if line.strip() == '>':
-                print('> ', end='', flush=True) # lets user write directly after > w/o newline
+                print('> ', end='', flush=True) # lets user write directly after > w/o newlinepython data_analysis_V3.py --file DATA/big_turntable_test_sample.txt --accel-file DATA/manual1.txt
             else:
                 print(line)
             

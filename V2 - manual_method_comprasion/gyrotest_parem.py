@@ -25,24 +25,80 @@ re_mode_start = re.compile(r"MODE=GYRO_START", re.IGNORECASE)
 re_mode_end = re.compile(r"MODE=GYRO_END", re.IGNORECASE)
 re_bias = re.compile(r"GX(?P<gx>[-\d\.eE]+).*?GY(?P<gy>[-\d\.eE]+).*?GZ(?P<gz>[-\d\.eE]+)")
 
+def build_Tg(g_yz,g_zy,g_xz,g_zx,g_xy,g_yx):
+    # same convention you used elsewhere
+    return np.array([[1.0, -g_yz,  g_zy],
+                     [ g_xz, 1.0, -g_zx],
+                     [-g_xy, g_yx, 1.0]], dtype=float)
+
+def parse_csv_floats(s):
+    # Accept "a,b,c" or "a b c" and return list of floats
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    for sep in [",", " "]:
+        parts = [p.strip() for p in s.split(sep) if p.strip() != ""]
+        if len(parts) >= 1:
+            try:
+                vals = [float(p) for p in parts]
+                return vals
+            except Exception:
+                continue
+    # last attempt: try eval-style
+    try:
+        vals = [float(p) for p in re.split(r"[,\s]+", s) if p]
+        return vals
+    except Exception:
+        return None
+
+def parse_gyro_cal_arg(s):
+    """
+    Parse --gyro-cal value.
+    Accepts comma/space-separated floats.
+    Returns tuple (bias3 or None, scale3 or None, mis6 or None).
+    Interpretations:
+      - 3 values  -> bias (gx,gy,gz)
+      - 6 values  -> misalign (g_yz,g_zy,g_xz,g_zx,g_xy,g_yx)
+      - 12 values -> bias(3), scale(3), misalign(6)
+    """
+    vals = parse_csv_floats(s)
+    if vals is None:
+        return None, None, None
+    n = len(vals)
+    if n == 3:
+        return tuple(vals), None, None
+    if n == 6:
+        return None, None, tuple(vals)
+    if n == 12:
+        bias = tuple(vals[0:3])
+        scale = tuple(vals[3:6])
+        mis = tuple(vals[6:12])
+        return bias, scale, mis
+    raise ValueError("Invalid --gyro-cal format: expected 3, 6 or 12 numeric values (bias / misalign / bias+scale+misalign).")
+
+
 def parse_bias_from_string(s):
     m = re_bias.search(s)
     if not m:
         return (0.0,0.0,0.0)
     return (float(m.group("gx")), float(m.group("gy")), float(m.group("gz")))
 
-def select_input_path():
-    # prefer explicit arg, then uploaded default, then DATA_FOLDER listing
-    if len(sys.argv) > 1:
-        p = Path(sys.argv[1])
+def select_input_path(input_path_from_cli):
+    # if CLI path provided
+    if input_path_from_cli:
+        p = Path(input_path_from_cli)
         if p.exists():
             return str(p)
         else:
-            print("Provided path not found:", sys.argv[1])
+            raise FileNotFoundError(f"Provided path not found: {input_path_from_cli}")
+
     # try default uploaded path
     p = Path(DEFAULT_INPUT)
     if p.exists():
         return str(p)
+
     # fallback to DATA_FOLDER listing
     folder = Path(DATA_FOLDER)
     if not folder.exists():
@@ -53,14 +109,38 @@ def select_input_path():
     print("Available files:")
     for i,f in enumerate(files):
         print(f" {i}: {f.name}")
-    try:
-        idx = input("Select file index (Enter for latest): ").strip()
-        if idx == "":
-            return str(files[-1])
-        idx = int(idx)
-        return str(files[idx])
-    except Exception as e:
-        raise FileNotFoundError("No file selected: "+str(e))
+    idx = input("Select file index (Enter for latest): ").strip()
+    if idx == "":
+        return str(files[-1])
+    idx = int(idx)
+    return str(files[idx])
+
+def apply_gyro_calib_to_samples(samples, mis_params=None, scale_params=None, bias_params=None):
+    """
+    samples: list of (ts, gx, gy, gz)
+    mis_params: 6-element list or None -> [g_yz,g_zy,g_xz,g_zx,g_xy,g_yx]
+    scale_params: 3-element list or None -> [sx,sy,sz]
+    bias_params: 3-element list or None -> [bx,by,bz]
+    returns: new_samples list of (ts, gx_cal, gy_cal, gz_cal)
+    """
+    if not samples:
+        return samples
+    bias = np.array(bias_params, dtype=float) if bias_params is not None else np.zeros(3)
+    scales = np.array(scale_params, dtype=float) if scale_params is not None else np.ones(3)
+    if mis_params is not None:
+        if len(mis_params) != 6:
+            raise ValueError("misalignment requires 6 parameters (g_yz,g_zy,g_xz,g_zx,g_xy,g_yx)")
+        Tg = build_Tg(*mis_params)
+    else:
+        Tg = np.eye(3)
+    Kg = np.diag(scales)
+
+    out = []
+    for (ts, gx, gy, gz) in samples:
+        v = np.array([gx, gy, gz], dtype=float)
+        v_corr = Tg @ (Kg @ (v - bias))
+        out.append((ts, float(v_corr[0]), float(v_corr[1]), float(v_corr[2])))
+    return out
 
 def integrate_run_trapezoid(samples, bias):
     if not samples:
@@ -325,11 +405,54 @@ def interactive_plotter(all_samples, runs_summary):
             print("Modifiers: ',flip' to invert sign, ',abs' for total absolute angle, ',axis=y' to change axis, 'html=PATH' to save plotly HTML.")
 
 def main():
-    path = select_input_path()
+    import argparse
+    ap = argparse.ArgumentParser(description="Process gyro runs and optionally apply gyro calibration.")
+    ap.add_argument("input_path", nargs="?", default=None,
+                    help="Path to input .txt file (optional). If omitted, the script will try DEFAULT_INPUT or list DATA_FOLDER.")
+    ap.add_argument("--gyro-cal", type=str, default=None,
+                    help='Single compact gyro calibration: 3=bias, 6=misalign, 12=bias(3),scale(3),misalign(6). Comma or space separated.')
+    ap.add_argument("--gyro-bias", type=str, default=None,
+                    help='Comma or space-separated gyro bias: "gx,gy,gz" (will override file/BIAS_STRING if provided).')
+    ap.add_argument("--gyro-scale", type=str, default=None,
+                    help='Comma-separated scales: "sx,sy,sz" (applied after bias subtraction).')
+    ap.add_argument("--gyro-misalign", type=str, default=None,
+                    help='Six misalignment params: "g_yz,g_zy,g_xz,g_zx,g_xy,g_yx" (applied as Tg).')
+    args = ap.parse_args()
+
+    # choose path (prefer explicit arg, then selector)
+    if args.input_path:
+        path = args.input_path
+    else:
+        try:
+            path = select_input_path(args.input_path)
+        except Exception as e:
+            sys.exit(f"Failed to select input file: {e}")
+
+    # parse CLI gyro cal args (prefer --gyro-cal single arg)
+    cli_bias = cli_scale = cli_mis = None
+    if args.gyro_cal:
+        try:
+            cli_bias, cli_scale, cli_mis = parse_gyro_cal_arg(args.gyro_cal)
+        except Exception as e:
+            sys.exit(f"Failed to parse --gyro-cal: {e}")
+    else:
+        cli_bias = parse_csv_floats(args.gyro_bias)
+        cli_scale = parse_csv_floats(args.gyro_scale)
+        cli_mis   = parse_csv_floats(args.gyro_misalign)
+
+    # validate sizes if present
+    if cli_bias is not None and len(cli_bias) != 3:
+        sys.exit("Expected 3 values for gyro bias.")
+    if cli_scale is not None and len(cli_scale) != 3:
+        sys.exit("Expected 3 values for gyro scale.")
+    if cli_mis is not None and len(cli_mis) != 6:
+        sys.exit("Expected 6 values for gyro misalignment.")
+
     print("Processing:", path)
     bias_from_string = parse_bias_from_string(BIAS_STRING)
-    print("Using bias:", bias_from_string)
+    print("Default bias from BIAS_STRING:", bias_from_string)
 
+    # parse file into runs (same as before)
     runs = []
     pending_hdr = None
     current_run = None
@@ -350,14 +473,12 @@ def main():
             if mh:
                 hdr = {"run_idx": int(mh.group("run")), "set_id": int(mh.group("set")), "V_cmd": float(mh.group("v")), "hdr_line": line}
                 pending_hdr = hdr
-                # if currently collecting a run, close it first
                 if current_run is not None:
                     runs.append(current_run)
                     current_run = None
                 continue
             # mode start -> start collecting (use pending_hdr if any)
             if re_mode_start.search(line):
-                # if already collecting a run, close and open new
                 if current_run is not None:
                     runs.append(current_run)
                 current_run = {"run_idx": pending_hdr["run_idx"] if pending_hdr else None,
@@ -377,29 +498,45 @@ def main():
             m = re_t_line.search(line)
             if m:
                 ts = int(m.group("ts")); gx = float(m.group("gx")); gy = float(m.group("gy")); gz = float(m.group("gz"))
-                # if we have a pending_hdr but no current_run, start a run automatically
                 if current_run is None and pending_hdr is not None:
                     current_run = {"run_idx": pending_hdr["run_idx"], "set_id": pending_hdr["set_id"],
                                    "V_cmd": pending_hdr["V_cmd"], "samples": []}
                     pending_hdr = None
-                # if still no current_run, create run with unknown header (so we capture all runs)
                 if current_run is None:
                     current_run = {"run_idx": None, "set_id": None, "V_cmd": float("nan"), "samples": []}
                 current_run["samples"].append((ts, gx, gy, gz))
                 continue
             # ignore other lines
-    # end file
     if current_run is not None:
         runs.append(current_run)
 
     print(f"Found {len(runs)} runs in file.")
+
+    # If CLI calibration provided, prepare values and apply to each run's samples.
+    use_cli_cal = (cli_bias is not None) or (cli_scale is not None) or (cli_mis is not None)
+    if use_cli_cal:
+        print("CLI gyro calibration provided. Applying to samples before integration.")
+        print(" CLI bias:", cli_bias)
+        print(" CLI scale:", cli_scale)
+        print(" CLI misalign:", cli_mis)
+        # Apply to each run's samples
+        for r in runs:
+            r["samples"] = apply_gyro_calib_to_samples(r["samples"],
+                                                      mis_params=cli_mis,
+                                                      scale_params=cli_scale,
+                                                      bias_params=cli_bias)
+        # after applying calibration, integration should not subtract additional bias:
+        bias_for_integration = (0.0, 0.0, 0.0)
+    else:
+        # use parsed string bias (BIAS_STRING or file override) as integrator bias
+        bias_for_integration = bias_from_string
 
     # integrate each run and assemble results
     all_samples = []
     runs_summary = []
     prev_V = None
     for order_idx, r in enumerate(runs, start=1):
-        integration = integrate_run_trapezoid(r["samples"], bias_from_string)
+        integration = integrate_run_trapezoid(r["samples"], bias_for_integration)
         if integration is None:
             continue
         duration = integration["duration_s"]
@@ -451,13 +588,6 @@ def main():
             for row in runs_summary:
                 w.writerow(row)
         print("Saved", OUT_RUN_SUMMARY)
-    if all_samples:
-        with open(OUT_SAMPLES, "w", newline="", encoding="utf-8") as fo:
-            w = csv.DictWriter(fo, fieldnames=list(all_samples[0].keys()))
-            w.writeheader()
-            for row in all_samples:
-                w.writerow(row)
-        print("Saved", OUT_SAMPLES)
 
     # preview
     print("\nFirst runs summary rows:")
