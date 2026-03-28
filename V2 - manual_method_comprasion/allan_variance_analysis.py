@@ -3,7 +3,7 @@
 allan_vs_tau_rad2_full.py
 
 Compute overlapping Allan variance (rad^2 / s^2) from Arduino logs,
-following the Tedaldi-style overlapping definition, and display a linear
+following the interval-average Allan definition, and display a linear
 plot with one tick per second on the x-axis up to TAU_MAX_REQ.
 
 Usage:
@@ -22,9 +22,22 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.widgets import Button, TextBox
 
-DATA_FOLDER = "SERVO_DATA"
-TAU_MAX_REQ = 1800  # display 1..TAU_MAX_REQ seconds on x-axis
+plt.rcParams["path.simplify"] = True
+plt.rcParams["path.simplify_threshold"] = 0.7
+
+DATA_FOLDER = "ALLAN_DATA"
+TAU_MIN_S = 1
+TAU_MAX_REQ = 1800  # analyze/display t0..tn (seconds)
+PAPER_FIGSIZE = (16, 8)
+PAPER_LABEL_SIZE = 18
+PAPER_TICK_SIZE = 14
+PAPER_LEGEND_SIZE = 13
+PAPER_LINEWIDTH = 2.2
+PAPER_MARKER_SIZE = 22
+PAPER_AXIS_WIDTH = 1.6
+PAPER_ANNOTATION_SIZE = 14
 
 # ---------------- file chooser ----------------
 def choose_file(folder):
@@ -90,17 +103,15 @@ def resample_uniform(t, x, target_fs=None):
     x_uniform = np.interp(t_uniform, t, x)
     return t_uniform, x_uniform, fs, np.mean(dt), np.std(dt), median_dt
 
-# ---------------- fast overlapping Allan variance (cumsum) ----------------
-def allan_variance_overlapping_from_uniform_cumsum(x_uniform, fs, tau_s, cumsum_x=None):
+# ---------------- Allan variance from interval averages (non-overlapping) ----------------
+def allan_variance_interval_avg_nonoverlap(x_uniform, fs, tau_s):
     """
-    Fast overlapping Allan variance using cumulative sums for moving averages.
+    Allan variance using non-overlapping interval averages.
 
     x_uniform : evenly sampled series (rad/s)
     fs        : sampling frequency (Hz)
     tau_s     : integration time in seconds (float)
-    cumsum_x  : optional precomputed cumulative sum array with leading zero:
-                cumsum_x = np.concatenate(([0.0], np.cumsum(x_uniform)))
-    Returns (sigma2, K) where K = N - 2*m + 1 (number of overlapping differences),
+    Returns (sigma2, K) where K = number of consecutive-interval differences used,
     or (None, 0) if not enough points.
     """
     if tau_s <= 0:
@@ -113,17 +124,14 @@ def allan_variance_overlapping_from_uniform_cumsum(x_uniform, fs, tau_s, cumsum_
     if 2 * m >= N:
         return None, 0
 
-    if cumsum_x is None:
-        cumsum_x = np.concatenate(([0.0], np.cumsum(x)))
-
-    # moving average mu of window length m:
-    # mu[i] = (cumsum_x[i+m] - cumsum_x[i]) / m   for i=0..N-m
-    mu = (cumsum_x[m:] - cumsum_x[:-m]) / float(m)
-
-    # differences separated by m: diffs = mu[m:] - mu[:-m]
-    if mu.size <= m:
+    n_intervals = N // m
+    if n_intervals < 2:
         return None, 0
-    diffs = mu[m:] - mu[:-m]
+
+    # Build K interval averages x(tilde_t, k) over non-overlapping windows.
+    x_cut = x[:n_intervals * m]
+    interval_means = x_cut.reshape(n_intervals, m).mean(axis=1)
+    diffs = np.diff(interval_means)
     K = diffs.size
     if K <= 0:
         return None, 0
@@ -147,17 +155,37 @@ def choose_Tinit_from_sigma(taus, sigma_vals, K_used, tol_rel=1.10, min_K=8):
 
 def effective_tau_limit_from_N(N, fs, min_K=8):
     """
-    Return the largest integer tau (in seconds) such that K = N - 2*m + 1 >= min_K,
-    with m = round(tau * fs). If even tau=1 fails, returns 0.
+    Return the largest integer tau (seconds) such that at least min_K
+    consecutive-interval differences are available in non-overlapping mode.
     """
     if N <= 0:
         return 0
-    # Solve for m: N - 2*m + 1 >= min_K  => m <= (N - min_K + 1) / 2
-    m_max = int(np.floor((N - min_K + 1) / 2.0))
+    # Need n_intervals - 1 >= min_K with n_intervals = floor(N / m)
+    # => floor(N / m) >= min_K + 1  => m <= N / (min_K + 1)
+    m_max = int(np.floor(N / float(min_K + 1)))
     if m_max < 1:
         return 0
     tau_max = int(np.floor(m_max / float(fs)))
     return tau_max
+
+def choose_axis_scale_exponent(*arrays):
+    finite_vals = []
+    for arr in arrays:
+        vals = np.asarray(arr)
+        vals = vals[np.isfinite(vals) & (vals != 0)]
+        if vals.size:
+            finite_vals.append(np.abs(vals))
+    if not finite_vals:
+        return 0
+    max_abs = np.max(np.concatenate(finite_vals))
+    return int(np.floor(np.log10(max_abs)))
+
+def format_scaled_tick(value, _pos, exponent):
+    if not np.isfinite(value):
+        return ""
+    scale = 10 ** exponent
+    scaled = value / scale
+    return f"{scaled:.3g}"
 
 # ---------------- main ----------------
 if __name__ == "__main__":
@@ -208,13 +236,8 @@ if __name__ == "__main__":
     if tau_max_by_time < 1:
         print("Recording too short for tau >= 1s."); sys.exit(1)
 
-    # prepare display taus 1..TAU_MAX_REQ
-    taus_display = np.arange(1, TAU_MAX_REQ + 1, 1)
-
-    # precompute cumsums once for speed
-    cumsum_x = np.concatenate(([0.0], np.cumsum(gx_u)))
-    cumsum_y = np.concatenate(([0.0], np.cumsum(gy_u)))
-    cumsum_z = np.concatenate(([0.0], np.cumsum(gz_u)))
+    # prepare display taus t0..tn
+    taus_display = np.arange(TAU_MIN_S, TAU_MAX_REQ + 1, 1)
 
     # decide minimum K required for trust plotting/compute
     min_K_trust = 8
@@ -231,9 +254,10 @@ if __name__ == "__main__":
 
     # final compute limit: do not compute beyond raw-duration nor TAU_MAX_REQ nor K-limit
     tau_max_compute = min(TAU_MAX_REQ, tau_max_by_time, tau_max_by_K)
-    print(f"Computing taus 1..{tau_max_compute} (limited by raw duration and K>={min_K_trust} across axes)")
+    tau_start_compute = max(TAU_MIN_S, 1)
+    print(f"Computing taus {tau_start_compute}..{tau_max_compute} (limited by raw duration and K>={min_K_trust} across axes)")
 
-    taus_compute = np.arange(1, tau_max_compute + 1, 1)  # integer seconds we will compute
+    taus_compute = np.arange(tau_start_compute, tau_max_compute + 1, 1)  # integer seconds we will compute
 
     # prepare full arrays for display (NaN where not computed)
     sigma2_x_full = np.full(taus_display.shape, np.nan)
@@ -243,10 +267,10 @@ if __name__ == "__main__":
 
     # compute Allan variance only where data permits (1..tau_max_compute)
     for tau in taus_compute:
-        idx = tau - 1
-        s2x, kx = allan_variance_overlapping_from_uniform_cumsum(gx_u, fs, float(tau), cumsum_x=cumsum_x)
-        s2y, ky = allan_variance_overlapping_from_uniform_cumsum(gy_u, fs, float(tau), cumsum_x=cumsum_y)
-        s2z, kz = allan_variance_overlapping_from_uniform_cumsum(gz_u, fs, float(tau), cumsum_x=cumsum_z)
+        idx = tau - TAU_MIN_S
+        s2x, kx = allan_variance_interval_avg_nonoverlap(gx_u, fs, float(tau))
+        s2y, ky = allan_variance_interval_avg_nonoverlap(gy_u, fs, float(tau))
+        s2z, kz = allan_variance_interval_avg_nonoverlap(gz_u, fs, float(tau))
         if s2x is not None and s2x > 0.0:
             sigma2_x_full[idx] = s2x
         if s2y is not None and s2y > 0.0:
@@ -266,12 +290,20 @@ if __name__ == "__main__":
     print("Saved numeric results to", out_txt)
 
     # ------------------ Plot Allan VARIANCE (sigma^2) in rad^2 / s^2 ------------------
-    fig, ax = plt.subplots(figsize=(14,6))
+    fig, ax = plt.subplots(figsize=PAPER_FIGSIZE)
 
-    # plot one point per integer tau (NaNs shown as gaps)
-    ax.plot(taus_display, sigma2_x_full, marker='o', markersize=3, linestyle='-', linewidth=0.7, label=r'$\sigma_x^2$ (rad$^2$/s$^2$)')
-    ax.plot(taus_display, sigma2_y_full, marker='s', markersize=3, linestyle='-', linewidth=0.7, label=r'$\sigma_y^2$ (rad$^2$/s$^2$)')
-    ax.plot(taus_display, sigma2_z_full, marker='^', markersize=3, linestyle='-', linewidth=0.7, label=r'$\sigma_z^2$ (rad$^2$/s$^2$)')
+    # Faster rendering: lines only (no marker at every tau).
+    ax.plot(taus_display, sigma2_x_full, linestyle='-', linewidth=PAPER_LINEWIDTH, label=r'$\sigma_x^2$ (rad$^2$/s$^2$)')
+    ax.plot(taus_display, sigma2_y_full, linestyle='-', linewidth=PAPER_LINEWIDTH, label=r'$\sigma_y^2$ (rad$^2$/s$^2$)')
+    ax.plot(taus_display, sigma2_z_full, linestyle='-', linewidth=PAPER_LINEWIDTH, label=r'$\sigma_z^2$ (rad$^2$/s$^2$)')
+
+    # Explicitly mark taus where values were actually computed (non-NaN).
+    mask_x = ~np.isnan(sigma2_x_full)
+    mask_y = ~np.isnan(sigma2_y_full)
+    mask_z = ~np.isnan(sigma2_z_full)
+    ax.scatter(taus_display[mask_x], sigma2_x_full[mask_x], s=PAPER_MARKER_SIZE, color='C0', alpha=0.7)
+    ax.scatter(taus_display[mask_y], sigma2_y_full[mask_y], s=PAPER_MARKER_SIZE, color='C1', alpha=0.7)
+    ax.scatter(taus_display[mask_z], sigma2_z_full[mask_z], s=PAPER_MARKER_SIZE, color='C2', alpha=0.7)
 
     # mark unreliable taus (small K)
     unreliable_mask = (K_used_full > 0) & (K_used_full < min_K_trust)
@@ -286,39 +318,50 @@ if __name__ == "__main__":
             np.nan_to_num(sigma2_z_full, nan=-np.inf)
         ])
         y_for_scatter[present_any] = np.nanmax(stacked, axis=0)[present_any]
-        ax.scatter(taus_display[unreliable_mask], y_for_scatter[unreliable_mask],
-                   facecolors='none', edgecolors='gray', s=30, label=f'K<{min_K_trust} (unreliable)')
+        x_bad = taus_display[unreliable_mask]
+        y_bad = y_for_scatter[unreliable_mask]
+        # Decimate markers to keep UI responsive on long records.
+        max_pts = 300
+        if x_bad.size > max_pts:
+            stride = int(np.ceil(x_bad.size / max_pts))
+            x_bad = x_bad[::stride]
+            y_bad = y_bad[::stride]
+        ax.scatter(x_bad, y_bad, facecolors='none', edgecolors='gray', s=PAPER_MARKER_SIZE + 8, linewidths=1.2,
+                   label=f'K<{min_K_trust} (unreliable)')
 
-    ax.set_xlabel('Tau (s)')
-    ax.set_ylabel('Allan variance σ² (rad$^2$/s$^2$)')
-    ax.set_title(f'Allan variance vs τ — linear axes (display 1..{TAU_MAX_REQ}), condensed ticks for large range')
-    ax.grid(True, which='both', ls=':', alpha=0.5)
-    ax.legend(loc='upper right')
+    ax.set_xlabel('Initsialiseerimise aeg $T_{init}$ (s)')
+    ax.set_ylabel('Allani varieeruvus σ² (rad$^2$/s$^2$)')
+    ax.xaxis.label.set_size(PAPER_LABEL_SIZE)
+    ax.yaxis.label.set_size(PAPER_LABEL_SIZE)
+    ax.tick_params(axis='both', which='major', labelsize=PAPER_TICK_SIZE, width=PAPER_AXIS_WIDTH)
+    for spine in ax.spines.values():
+        spine.set_linewidth(PAPER_AXIS_WIDTH)
+    y_exponent = choose_axis_scale_exponent(sigma2_x_full, sigma2_y_full, sigma2_z_full)
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, pos: format_scaled_tick(value, pos, y_exponent))
+    )
+    if y_exponent != 0:
+        ax.text(0.0, 1.01, rf"$\mathrm{{x}}\,10^{{{y_exponent}}}$", transform=ax.transAxes,
+                ha='left', va='bottom', fontsize=PAPER_ANNOTATION_SIZE)
+    ax.grid(True, which='major', ls=':', alpha=0.5)
+    ax.legend(loc='upper right', fontsize=PAPER_LEGEND_SIZE, framealpha=0.95)
 
-    # x-limits fixed
-    ax.set_xlim(1, TAU_MAX_REQ)
+    def apply_x_range(x_max):
+        x_max = float(np.clip(x_max, 1.0, float(TAU_MAX_REQ)))
+        ax.set_xlim(1, x_max)
 
-    # Tick strategy:
-    # - If display length is small, put a major tick each second (user request preserved when reasonable).
-    # - For large TAU_MAX_REQ, use major ticks every 10 s and minor ticks every 1 s so visually there's a 1s grid
-    display_len = TAU_MAX_REQ
-    if display_len <= 600:
-        major_locator = mticker.MultipleLocator(1)
-        minor_locator = mticker.AutoMinorLocator(1)
-    else:
-        major_locator = mticker.MultipleLocator(10)
-        minor_locator = mticker.MultipleLocator(1)
-    ax.xaxis.set_major_locator(major_locator)
-    ax.xaxis.set_minor_locator(minor_locator)
-    ax.tick_params(axis='x', which='minor', length=4, direction='out')
+        # Lighter tick density for faster redraw.
+        if x_max <= 120:
+            major_locator = mticker.MultipleLocator(5)
+        elif x_max <= 600:
+            major_locator = mticker.MultipleLocator(10)
+        else:
+            major_locator = mticker.MultipleLocator(25)
+        ax.xaxis.set_major_locator(major_locator)
+        ax.xaxis.set_minor_locator(mticker.NullLocator())
 
-    # Secondary axis: show K_used to explain reliability of points
-    ax2 = ax.twinx()
-    ax2.plot(taus_display, K_used_full, linestyle='--', linewidth=0.6, color='0.3', label='K_used (overlaps)')
-    ax2.set_ylabel('K (number of overlapping differences)')
-    kmax = int(np.nanmax(K_used_full)) if np.any(K_used_full) else 10
-    ax2.set_ylim(0, max(10, kmax + 2))
-    ax2.legend(loc='lower right')
+    # Initial x-range.
+    apply_x_range(TAU_MAX_REQ)
 
     # mark recommended T_init (using variance arrays directly)
     tx = choose_Tinit_from_sigma(taus_display, sigma2_x_full, K_used_full, tol_rel=1.10, min_K=min_K_trust)
@@ -329,14 +372,40 @@ if __name__ == "__main__":
     if cands:
         T_init_reco = max(cands)
         print("Recommended conservative T_init:", T_init_reco, "s")
-        ax.axvline(T_init_reco, color='k', linestyle='--', linewidth=1)
+        ax.axvline(T_init_reco, color='k', linestyle='--', linewidth=1.8)
         ymin, ymax = ax.get_ylim()
-        ax.text(T_init_reco * 1.01, ymin + 0.03 * (ymax - ymin), f"T_init={T_init_reco}s", rotation=90, va='bottom')
+        ax.text(T_init_reco * 1.01, ymin + 0.03 * (ymax - ymin), f"T_init={T_init_reco}s", rotation=90, va='bottom', fontsize=PAPER_ANNOTATION_SIZE)
 
-    plt.tight_layout()
-    png = "allan_variance_rad2_full_linear.png"
-    plt.savefig(png, dpi=300)
-    print("Saved plot (variance) to", png)
+    # Interactive x-axis zoom controls (set max second + button).
+    fig.subplots_adjust(bottom=0.18)
+    txt_ax = fig.add_axes([0.14, 0.04, 0.18, 0.055])
+    btn_ax = fig.add_axes([0.34, 0.04, 0.10, 0.055])
+    reset_ax = fig.add_axes([0.45, 0.04, 0.12, 0.055])
+
+    x_max_box = TextBox(txt_ax, "X max (s)", initial=str(TAU_MAX_REQ))
+    set_btn = Button(btn_ax, "Set")
+    reset_btn = Button(reset_ax, "Reset")
+
+    def on_set_clicked(_event):
+        raw = x_max_box.text.strip()
+        try:
+            val = float(raw)
+            if val <= 1:
+                raise ValueError()
+            apply_x_range(val)
+            fig.canvas.draw_idle()
+        except Exception:
+            print(f"Invalid X max: '{raw}'. Enter a number > 1.")
+
+    def on_reset_clicked(_event):
+        x_max_box.set_val(str(TAU_MAX_REQ))
+        apply_x_range(TAU_MAX_REQ)
+        fig.canvas.draw_idle()
+
+    set_btn.on_clicked(on_set_clicked)
+    reset_btn.on_clicked(on_reset_clicked)
+
+    # Keep widget layout stable and avoid expensive relayout on large figures.
     try:
         plt.show()
     except Exception as e:

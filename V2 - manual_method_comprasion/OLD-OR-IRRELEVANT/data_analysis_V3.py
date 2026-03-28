@@ -11,10 +11,10 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3D plotting)
 data_folder = "DATA"
 g = 9.81872
 SAMPLE_RATE_HZ = 70.0
-GYRO_UNITS = "rad_s"
+GYRO_UNITS = "deg_s"
 GYRO_AXIS_SIGN = np.array([1.0, 1.0, 1.0])
 GYRO_CALIB_MODE = "fit_bias"
-GYRO_FIT_MISALIGNMENT = True
+GYRO_FIT_MISALIGNMENT = False
 ACCEL_UNITS = "g"
 
 # Integrator options: 'rk4' (default), 'rodrigues', 'smallangle'
@@ -23,6 +23,37 @@ GYRO_INTEGRATOR = "rk4"
 # =========================
 # Helpers
 # =========================
+
+def angle_between_vectors_rad(v1, v2, eps=1e-12):
+    """
+    Returns the angle between v1 and v2 in radians.
+    Robust against tiny floating point errors.
+    """
+    v1 = np.asarray(v1, dtype=float)
+    v2 = np.asarray(v2, dtype=float)
+
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+
+    if n1 < eps or n2 < eps:
+        raise ValueError("Zero-length vector passed to angle_between_vectors_rad")
+
+    u1 = v1 / n1
+    u2 = v2 / n2
+
+    c = np.dot(u1, u2)
+    c = np.clip(c, -1.0, 1.0)
+
+    return np.arccos(c)
+
+
+def angle_between_vectors_deg(v1, v2, eps=1e-12):
+    """
+    Returns the angle between v1 and v2 in degrees.
+    """
+    return np.degrees(angle_between_vectors_rad(v1, v2, eps=eps))
+
+
 def list_txt_files(directory):
     folder_path = os.path.join(directory, data_folder)
     return [f for f in os.listdir(folder_path) if f.endswith('.txt')]
@@ -71,6 +102,11 @@ def per_segment_errors(scales, bias, dirs, gyros, gamma=np.zeros(6)):
         omega = (Tg @ (Kg @ (seg.T + bias[:, None]))).T
         omega_r = omega_to_rad_s(omega)
 
+        dt = 1.0 / SAMPLE_RATE_HZ
+
+        theta = np.linalg.norm(np.sum(omega_r, axis=0) * dt)
+        print("segment rotation:", np.degrees(theta), "deg")    
+
         q_final = rk4n_integrate_quat(omega_r, 1.0 / SAMPLE_RATE_HZ)
         R = quat_to_R(q_final)
 
@@ -91,21 +127,17 @@ mode_end   = re.compile(r"MODE\s*=\s*GYRO_END", re.I)
 # parse_log_with_indices + helpers for aligned parsing
 # -------------------------
 def parse_log_with_indices(path: str):
-    """
-    Parse the log and return:
-      - accel_samples: list of tuples (global_idx, np.array([x,y,z]))
-      - gyro_segments: list of dicts: {'start_idx': int, 'end_idx': int, 'samples': np.ndarray}
-      - bias: optional gyro bias array (if present in log)
-    The parser increments a global counter each time a gyro or accel line is seen so
-    that sample indices are comparable across sensors.
-    """
     accel_samples = []
     gyro_segments = []
     bias = None
+
     global_idx = 0
     in_seg = False
+    pending_end = False
     seg_buf = []
-    seg_start_idx = None
+
+    seg_start_accel_idx = None
+    last_accel_idx = None
 
     gyro_bias_pat = re.compile(
         r"&?GYRO_BIAS.*?GX\s*([-+]?\d*\.?\d+)\s*GY\s*([-+]?\d*\.?\d+)\s*GZ\s*([-+]?\d*\.?\d+)",
@@ -120,35 +152,26 @@ def parse_log_with_indices(path: str):
 
             m_bias = gyro_bias_pat.search(line)
             if m_bias:
-                bias = np.array(list(map(float, m_bias.groups())))
-                # bias line not counted as sensor sample (safe)
+                bias = np.array(list(map(float, m_bias.groups())), dtype=float)
                 continue
 
             if mode_start.search(line):
                 in_seg = True
+                pending_end = False
                 seg_buf = []
-                seg_start_idx = global_idx
+                seg_start_accel_idx = last_accel_idx
                 continue
 
             if mode_end.search(line):
                 in_seg = False
-                seg_end_idx = global_idx
-                # push the segment with recorded start/end indices
-                gyro_segments.append({
-                    "start_idx": seg_start_idx,
-                    "end_idx": seg_end_idx,
-                    "samples": np.array(seg_buf, dtype=float)
-                })
-                seg_buf = []
-                seg_start_idx = None
+                pending_end = True
                 continue
 
             m_g = gyro_pat.search(line)
             if m_g:
-                vals = list(map(float, m_g.groups()))
+                vals = np.array(list(map(float, m_g.groups())), dtype=float)
                 if in_seg:
                     seg_buf.append(vals)
-                # Count gyro sample as a global sample (even if not in segment) to preserve alignment
                 global_idx += 1
                 continue
 
@@ -156,18 +179,20 @@ def parse_log_with_indices(path: str):
             if m_a:
                 vals = np.array(list(map(float, m_a.groups())), dtype=float)
                 accel_samples.append((global_idx, vals))
-                # Count accel sample as a global sample too
+                last_accel_idx = global_idx
+
+                if pending_end and seg_start_accel_idx is not None:
+                    gyro_segments.append({
+                        "start_accel_idx": seg_start_accel_idx,
+                        "end_accel_idx": global_idx,
+                        "samples": np.array(seg_buf, dtype=float)
+                    })
+                    seg_buf = []
+                    seg_start_accel_idx = None
+                    pending_end = False
+
                 global_idx += 1
                 continue
-
-    # if we ended while still in a segment, close it
-    if in_seg and seg_buf:
-        seg_end_idx = global_idx
-        gyro_segments.append({
-            "start_idx": seg_start_idx,
-            "end_idx": seg_end_idx,
-            "samples": np.array(seg_buf, dtype=float)
-        })
 
     return accel_samples, gyro_segments, bias
 
@@ -243,7 +268,7 @@ def project_onto_plane(v, n):
     """Project vector v onto plane orthogonal to unit vector n."""
     return v - np.dot(v, n) * n
 
-def safe_normalize(v, eps=1e-12):
+def safe_normalize(v, eps=1e-3):
     norm = np.linalg.norm(v)
     if norm <= eps:
         return v, norm
@@ -544,12 +569,7 @@ def plot_accel_sphere(raw_ms2: np.ndarray, calib_ms2: np.ndarray):
 # =========================
 # Compute segment pose vectors (a0,a1) and comparison logic
 # =========================
-def compute_segment_pose_vectors(accel_samples, gyro_segments, accel_params, win_before=10, win_after=10):
-    """
-    For each gyro segment return (a0, a1) normalized unit vectors
-    a0: averaged accel vector just before the segment start
-    a1: averaged accel vector just after the segment end
-    """
+def compute_segment_pose_vectors(accel_samples, gyro_segments, accel_params, before=10, after=10):
     idxs, vals = accel_samples_to_indexed_array(accel_samples)
     if idxs.size == 0:
         return []
@@ -560,101 +580,130 @@ def compute_segment_pose_vectors(accel_samples, gyro_segments, accel_params, win
 
     poses = []
     for seg in gyro_segments:
-        sidx = int(seg["start_idx"])
-        eidx = int(seg["end_idx"])
-        a0_raw = average_accel_window(idxs, vals_cal, sidx, before=win_before, after=0)
-        a1_raw = average_accel_window(idxs, vals_cal, eidx, before=0, after=win_after)
-        na0 = a0_raw / np.linalg.norm(a0_raw) if np.linalg.norm(a0_raw) > 0 else a0_raw
-        na1 = a1_raw / np.linalg.norm(a1_raw) if np.linalg.norm(a1_raw) > 0 else a1_raw
-        poses.append((na0, na1))
+        sidx = seg.get("start_accel_idx", None)
+        eidx = seg.get("end_accel_idx", None)
+
+        if sidx is None or eidx is None:
+            continue
+
+        # Average around the start/end accel sample indices
+        a0 = average_accel_window(idxs, vals_cal, sidx, before=before, after=after).copy()
+        a1 = average_accel_window(idxs, vals_cal, eidx, before=before, after=after).copy()
+
+        n0 = np.linalg.norm(a0)
+        n1 = np.linalg.norm(a1)
+        if n0 < 1e-12 or n1 < 1e-12:
+            continue
+
+        a0 /= n0
+        a1 /= n1
+        poses.append((a0, a1))
+
     return poses
 
 def integrate_segment_to_rotation_for_compare(seg, sample_rate, integrator="rk4", bias=None):
     seg_arr = np.array(seg, dtype=float)
     if seg_arr.size == 0:
-        return np.array([1.0,0.0,0.0,0.0]), np.eye(3), 0.0
+        return np.array([1.0, 0.0, 0.0, 0.0]), np.eye(3), 0.0
+
+    # FIX: subtract bias, do not add
     if bias is not None:
         seg_arr = seg_arr - np.array(bias)[None, :]
-    omega_r = omega_to_rad_s(seg_arr)  # uses GYRO_UNITS global setting
+
+    omega_r = omega_to_rad_s(seg_arr)
     dt = 1.0 / sample_rate
+
     if integrator == "rk4":
         q = rk4n_integrate_quat(omega_r, dt)
         R = quat_to_R(q)
         w = np.clip(q[0], -1.0, 1.0)
         ang = 2.0 * np.arccos(w)
         return q, R, ang
+
     elif integrator == "rodrigues":
         dtheta = np.sum(omega_r, axis=0) * dt
         theta = np.linalg.norm(dtheta)
         if theta < 1e-12:
-            return np.array([1.0,0,0,0]), np.eye(3), 0.0
-        k_axis = dtheta / theta
-        K = np.array([[0, -k_axis[2], k_axis[1]],
-                      [k_axis[2], 0, -k_axis[0]],
-                      [-k_axis[1], k_axis[0], 0]])
-        R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
-        return None, R, theta
-    else:  # smallangle
-        dtheta = np.sum(omega_r, axis=0) * dt
-        theta = np.linalg.norm(dtheta)
-        K = np.array([[0, -dtheta[2], dtheta[1]],
-                      [dtheta[2], 0, -dtheta[0]],
-                      [-dtheta[1], dtheta[0], 0]])
-        R = np.eye(3) + K
+            return np.array([1.0, 0.0, 0.0, 0.0]), np.eye(3), 0.0
+        R = rodrigues_exp(dtheta)
         return None, R, theta
 
-def compare_tedaldi_style(accel_samples, gyro_segments, accel_params, sample_rate, integrator="rk4", bias=None, win_before=10, win_after=10, limit=200):
-    poses = compute_segment_pose_vectors(accel_samples, gyro_segments, accel_params, win_before=win_before, win_after=win_after)
+    else:  # smallangle
+        dtheta = np.sum(omega_r, axis=0) * dt
+        K = skew(dtheta)
+        R = np.eye(3) + K
+        theta = np.linalg.norm(dtheta)
+        return None, R, theta
+
+def compare_tedaldi_style(
+    accel_samples,
+    gyro_segments,
+    accel_params,
+    sample_rate,
+    integrator="rk4",
+    bias=None,
+    win_before=10,
+    win_after=10,
+    limit=200
+):
+    poses = compute_segment_pose_vectors(
+        accel_samples,
+        gyro_segments,
+        accel_params,
+        before=win_before,
+        after=win_after
+    )
+
     results = []
     n = min(len(poses), len(gyro_segments), limit)
+
     for i in range(n):
         a0, a1 = poses[i]
         seg = gyro_segments[i]["samples"]
-        q, R, gyro_ang = integrate_segment_to_rotation_for_compare(seg, sample_rate, integrator=integrator, bias=bias)
 
-        # choose gravity axis for this segment: use a0 (averaged start accel direction)
-        g_hat, g_norm = safe_normalize(a0)
-        if g_norm < 1e-6:
-            print(f"Seg {i}: skipping (invalid gravity vector)")
-            continue
+        q, R, gyro_ang = integrate_segment_to_rotation_for_compare(
+            seg,
+            sample_rate,
+            integrator=integrator,
+            bias=bias
+        )
 
-        # project onto plane orthogonal to gravity (removes rotation around gravity)
-        a0_plane = project_onto_plane(a0, g_hat)
-        a1_plane = project_onto_plane(a1, g_hat)
-        a0p, n0 = safe_normalize(a0_plane)
-        a1p, n1 = safe_normalize(a1_plane)
-        if n0 < 1e-6 or n1 < 1e-6:
-            print(f"Seg {i}: skipping (projection too small; a0 or a1 approx parallel to gravity)")
-            continue
+        # predicted final gravity direction from gyro
+        a1_pred = R @ a0
+        a1_pred /= np.linalg.norm(a1_pred)
 
-        # accel-observable rotation (plane)
-        dot_accel = np.clip(np.dot(a0p, a1p), -1.0, 1.0)
-        accel_ang_plane = np.arccos(dot_accel)
+        # observable tilt change from accel
+        accel_ang = angle_between_vectors_rad(a0, a1)
 
-        # predicted by gyro: rotate a0, project, compare
-        a1_from_gyro = R @ a0
-        a1g_plane = project_onto_plane(a1_from_gyro, g_hat)
-        a1g_p, n1g = safe_normalize(a1g_plane)
-        if n1g < 1e-6:
-            print(f"Seg {i}: skipping (gyro predicted projection too small)")
-            continue
-
-        dot_pred = np.clip(np.dot(a1g_p, a1p), -1.0, 1.0)
-        pred_angle_plane = np.arccos(dot_pred)
-
-        # also compute gyro-plane-angle (angle between a0p and a1g_p)
-        gyro_plane_angle = np.arccos(np.clip(np.dot(a0p, a1g_p), -1.0, 1.0))
+        # angle between gyro-predicted end direction and measured end direction
+        pred_err = angle_between_vectors_rad(a1_pred, a1)
 
         results.append({
             "idx": i,
-            "accel_angle_rad": accel_ang_plane,
-            "gyro_angle_rad": gyro_plane_angle,
-            "pred_error_rad": pred_angle_plane,
+            "accel_angle_rad": accel_ang,
+            "gyro_angle_rad": gyro_ang,
+            "pred_error_rad": pred_err,
             "a0": a0,
             "a1": a1,
-            "a1_pred": a1_from_gyro
+            "a1_pred": a1_pred
         })
-        print(f"Seg {i:2d}: accel_plane_angle={np.degrees(accel_ang_plane):7.3f}° | gyro_plane_angle={np.degrees(gyro_plane_angle):7.3f}° | pred_error={np.degrees(pred_angle_plane):7.3f}°")
+
+        print(
+            f"Seg {i:2d}: "
+            f"accel_angle={np.degrees(accel_ang):7.3f} deg | "
+            f"gyro_angle={np.degrees(gyro_ang):7.3f} deg | "
+            f"pred_error={np.degrees(pred_err):7.3f} deg"
+        )
+
+    if results:
+        errs_deg = np.array([np.degrees(r["pred_error_rad"]) for r in results])
+        print("\nComparison summary:")
+        print(f"  mean pred error   = {np.mean(errs_deg):.3f} deg")
+        print(f"  median pred error = {np.median(errs_deg):.3f} deg")
+        print(f"  max pred error    = {np.max(errs_deg):.3f} deg")
+    else:
+        print("No valid comparison segments found.")
+
     return results
 
 # =========================
@@ -672,6 +721,9 @@ def compare_cross_calibration(target_path: str, calib_params: np.ndarray):
     accel_new_ms2 = vals * g if 0.3 <= mean_norm <= 2 else vals
     accel_calib_ms2 = accel_apply(accel_new_ms2, calib_params)
     accel_summary(accel_calib_ms2, accel_new_ms2)
+
+def accel_angle(a0, a1):
+    return angle_between_vectors_deg(a0, a1)
 
 # =========================
 # Main
@@ -785,7 +837,7 @@ if __name__ == "__main__":
     )
 
     # Build accel_cal array for gyro calibration: take first a0 and then each a1
-    poses = compute_segment_pose_vectors(accel_samples, gyro_segments, acc_p, win_before=10, win_after=10)
+    poses = compute_segment_pose_vectors(accel_samples, gyro_segments, acc_p)
     if poses:
         # Construct accel_cal with length = (#segments) + 1
         accel_cal_list = []
@@ -828,6 +880,7 @@ if __name__ == "__main__":
 
         # Reconstruct dirs used in calibration
         dirs = accel_cal / np.linalg.norm(accel_cal, axis=1, keepdims=True)
+        
 
         # Get fitted values
         scale_fit = gyro_info["scale"]
